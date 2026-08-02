@@ -4,6 +4,8 @@ A self-paced, skill-ladder SQL portfolio covering everything from basic `SELECT`
 
 See [PLAN.md](./PLAN.md) for the full phase-by-phase plan, KPIs, and datasets.
 
+See [MASTER-GUIDE.md](./MASTER-GUIDE.md) for granular, worked breakdowns of every hard practice question cracked along the way.
+
 ## Modules
 
 | Folder | Topic |
