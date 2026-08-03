@@ -23,6 +23,8 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 2 | JOIN roles, GROUP BY dependency, clause execution order | Chinook — Genres with more than 100 tracks | `INNER JOIN`, `GROUP BY` on a primary key, why `HAVING` can't see `SELECT` aliases |
 | 3 | WHERE vs HAVING mechanics, reusable JOIN/GROUP BY/HAVING checklist | Chinook — Average track duration per genre (>50 tracks) | Row-filter vs. group-filter, `AVG()`, the general-purpose checklist for this whole query shape |
 | 4 | Ambiguous columns after JOIN, primary vs foreign key, "many-side" columns in SELECT | Chinook — Artists with more than 5 albums | Table-prefixing every shared column name, PK vs FK terminology, why a raw many-side column can't sit next to a GROUP BY |
+| 5 | FROM/JOIN role is about relationship, not row-count; duplicate GROUP BY keys with identical display names | Chinook — Playlists with more than 20 tracks | Why "pile you're counting" beats "bigger table" as the FROM/JOIN rule, why grouping by an ID can output two rows with the same visible name |
+| 6 | NULL replacement: WHERE vs. COALESCE vs. CASE WHEN | Chinook — Customers with no company on file | Why filtering (`WHERE`) and substituting (`COALESCE`/`CASE`) answer different questions; two ways to express the same substitution logic |
 
 ---
 
@@ -431,4 +433,160 @@ ORDER BY title_count DESC;
 - **Included `album.title` in `SELECT`** alongside a `GROUP BY artist.artist_id` — the "many-side column" mistake described above. Different flavor from earlier `GROUP BY` mistakes: this wasn't about picking the wrong column to group by, it was about including an *extra, ungroupable* column that didn't belong in the output at all.
 - **Wrote bare `artist_id`** in `COUNT()` and `HAVING` after joining two tables that both have a column by that name — triggered Postgres's actual "ambiguous column" error. Fixed immediately, without needing a second reminder, once the table-prefix rule was pointed back to.
 - **Used the term "secondary key"** instead of "foreign key" — not a real SQL term; corrected to the standard vocabulary (primary key / foreign key) so future reading and documentation makes sense.
+
+---
+
+## 5. FROM/JOIN Role Is About Relationship, Not Row-Count, Plus Duplicate GROUP BY Keys With Identical Names — Playlists With More Than 20 Tracks
+
+### The question
+Using Chinook, find every playlist with more than 20 tracks in it — show the playlist name and the track count, most tracks first.
+
+### Why this one matters
+The core skeleton (JOIN roles, GROUP BY on a primary key, raw aggregate in HAVING, alias in ORDER BY) came out clean on the very first attempt against a brand-new table pair (`playlist_track` / `playlist`) — further confirmation the pattern has transferred. But two new things surfaced once the query actually ran and once I tried to explain *why* the FROM/JOIN choice was correct:
+
+1. **The rule I reached for by instinct was wrong, even though the answer was right.** I said "pick the table with large data as FROM and join it to the table with small data for lookup." That happened to work here, but it's the wrong reason — and a wrong reason is a rule that eventually breaks on a case where it doesn't hold.
+2. **A real query result with two rows that look identical** ("Music" showing 3,290 twice, "TV Shows" showing 213 twice) — not a bug, but a data quirk that needed explaining.
+
+### Real-world version of this same problem
+Think of a school's list of after-school clubs. There's a big sign-up sheet — one line per student per club they joined — and a separate small poster listing each club's official name. Two different clubs on the poster can coincidentally share the exact same name (say, two separate "Chess Club" entries run by two different teachers, each with its own roster). If you count sign-up sheet entries "per club," you don't get one combined "Chess Club" number — you get two separate numbers, one per actual club, that just happen to display under the same word. The sign-up sheet (many rows, one per membership) is what you count from; the poster (one row per named club) is only there to hand you the label.
+
+### The concept, explained from zero
+
+**FROM vs. JOIN — the correct rule is about relationship, not size.** It is tempting to say "put the bigger table in FROM." That's usually true, but it's true *as a side effect*, not as the reason. The actual rule: **FROM holds the table where each row represents one instance of the thing you're counting or measuring. JOIN holds the table that exists only to attach a shared label/fact to those instances.** In this question, `playlist_track` has one row per track-in-a-playlist link — that's the thing being counted — so it's `FROM`. `playlist` has one row per playlist, existing only to supply the `name` — so it's `JOIN`. Row count usually follows from this relationship (the "many" side naturally has more rows), but row count is a *symptom*, not the test to apply. Anchor on "what does one row of this table actually represent?", not on which table looks bigger.
+
+**Grouping by an ID can produce two output rows with an identical-looking name.** `GROUP BY playlist.playlist_id` groups by the real, unique identifier — not by `name`. If the `playlist` table happens to contain two separate rows both named "Music" (different `playlist_id`s, e.g. 1 and 8), each one is its own group, and each surfaces as its own row in the output, even though the displayed `name` column looks identical between them. This is not a query bug — it's the data itself having two distinct rows that share a label. The fix, if you ever *do* want them merged, would be to `GROUP BY playlist.name` instead — but that reintroduces the earlier risk (name isn't guaranteed to be the right grouping key) and wasn't what this question asked for.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Name the two tables and ask which one is "the pile you're counting" vs. "the label-supplier."** `playlist_track` = one row per track-in-a-playlist (the pile). `playlist` = one row per playlist, holding the name (the label-supplier).
+2. **FROM = the pile, JOIN = the label-supplier.** `FROM playlist_track INNER JOIN playlist`.
+3. **ON — match the shared column.** `ON playlist_track.playlist_id = playlist.playlist_id`.
+4. **GROUP BY the lookup table's primary key.** `GROUP BY playlist.playlist_id` — licenses selecting `playlist.name` in SELECT for free.
+5. **HAVING uses the raw aggregate.** `HAVING COUNT(*) > 20`.
+6. **SELECT the things actually asked for** — the question said show the **name**, not the id, so `playlist.name` belongs in SELECT, not `playlist.playlist_id`.
+7. **ORDER BY the alias**, matched exactly to how it was spelled in SELECT — a typo here (`tarck_count` vs. `track_count`) breaks the query even though every other clause is correct.
+
+### Hand-trace through a small example
+
+Say `playlist` has 2 rows, and `playlist_track` has 25 rows total:
+
+| playlist_id | name |
+|---|---|
+| 1 | Music |
+| 2 | Workout |
+
+`playlist_track` (just `playlist_id` shown, one row per track-in-playlist link): 22 rows tagged `1`, 3 rows tagged `2`.
+
+After `JOIN`: 25 rows, each tagged with its playlist's name.
+After `GROUP BY playlist.playlist_id`: 2 groups — Music (22), Workout (3).
+After `HAVING COUNT(*) > 20`: only Music survives.
+
+Now imagine a second "Music" playlist existed with `playlist_id = 9` and its own 21 tracks. That would form a *third* group, entirely separate from `playlist_id = 1`, and the final output would show "Music" twice with two different counts — exactly the shape that showed up in the real Chinook results.
+
+### Full solution
+
+```sql
+SELECT
+    COUNT(*) AS track_count,
+    playlist.name
+FROM playlist_track
+INNER JOIN playlist
+    ON playlist_track.playlist_id = playlist.playlist_id
+GROUP BY playlist.playlist_id
+HAVING COUNT(*) > 20
+ORDER BY track_count DESC;
+```
+
+### The pattern to remember
+
+**FROM/JOIN placement is decided by "what does one row of this table represent?" — not by which table looks bigger.** The counting table (one row per instance of the thing being measured) goes in `FROM`; the label-supplying table (one row per named category) goes in `JOIN`. Row-count size is a consequence of this, never the test itself.
+
+**Grouping by an ID, not a name, means duplicate-looking labels in the output are expected, not a bug** — always sanity-check duplicate-looking rows against the actual ID column before assuming something broke.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Test FROM/JOIN choice with "what does one row of this table represent?"**, not "which table has more rows?" — the two usually agree, but only the first one is actually the reason.
+- **If two output rows show the same name but different counts, check whether you grouped by an ID** — that's very likely two distinct records that happen to share a display label, not a query error.
+- **Match SELECT to what the question literally asks for** — "show the playlist name" means `playlist.name` belongs in SELECT, not the id, even if the id was fine to use for grouping.
+- **Proofread `ORDER BY` aliases letter-for-letter against the `SELECT` alias** — a typo here (`tarck_count` vs. `track_count`) causes an undefined-column error that has nothing to do with the query's logic.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Selected `playlist.playlist_id` in SELECT instead of `playlist.name`** — the id was fine for `GROUP BY`, but the question asked to *display* the name, a different requirement entirely.
+- **Typo'd the `ORDER BY` alias** (`tarck_count` instead of `track_count`) — caught before running, but would have thrown an undefined-column error.
+- **After getting FROM/JOIN correct on the first pass, flipped it backward** (`FROM playlist INNER JOIN playlist_track`) when asked to restate the reasoning in the abstract — evidence the correct answer had been pattern-matched for this specific pair, not yet fully internalized as a transferable rule. Self-corrected once walked back through "which table hands the name vs. which table counts rows."
+- **Reached for "bigger table = FROM" as the underlying rule** — works by coincidence in every example seen so far, but is the wrong justification; the real test is what a single row of the table represents, not its row count.
+
+---
+
+## 6. NULL Replacement: WHERE vs. COALESCE vs. CASE WHEN — Customers With No Company On File
+
+### The question
+Using Chinook, for every customer, show first name, last name, and company — but if `company` is `NULL`, show "Independent" instead.
+
+### Why this one is a genuinely different shape from the JOIN/GROUP BY questions
+Every prior entry in this guide was about *collapsing many rows into fewer, filtered groups* (JOIN + GROUP BY + HAVING). This question doesn't group or filter anything — it wants **every single customer row, unchanged in count**, with one column's *value* transformed conditionally. That's a completely different job: value substitution, not row reduction. The trap is reaching for `WHERE`, since `WHERE` is the tool that's been used the most so far — but `WHERE` removes rows; it never changes what a surviving row's value looks like.
+
+### Real-world version of this same problem
+Think of a paper contact list where some entries have "Company: ___" left blank. If someone asks *"print me the full list, and where company's blank just write 'Independent' instead of leaving it empty,"* that's not asking you to throw away the blank entries — every name still needs to appear on the printed list. You're not choosing who's included; you're deciding what to *write* in one specific slot when it would otherwise be empty. Filtering (who's on the list) and substituting (what one field says) are two different jobs, and only one of them was actually asked for here.
+
+### The concepts, explained from zero
+
+**Why `WHERE company IS NULL` doesn't solve this.** `WHERE` runs at the row-filtering stage — for every row, it asks a yes/no question and either keeps the row or throws it away entirely. `WHERE company IS NULL` keeps *only* the rows where company is missing and discards every customer who actually has one — the opposite of "show everyone, everyone." Even if you fixed the quoting on it (see below), it still answers a different question: *"which customers have no company?"* rather than *"show all customers, filling in a default where needed."*
+
+**Why `IS NULL` is never quoted.** `NULL` is a special SQL keyword representing "no value," not a piece of text. Writing `IS "NULL"` (double quotes) tells Postgres you mean a column/identifier literally named `NULL` — not the concept of missingness. Writing `IS 'NULL'` (single quotes) would check for the literal four-character string `"NULL"` as data, which is also wrong. The comparison keyword is always bare: `IS NULL` / `IS NOT NULL`, no quotes at all, because it's a language keyword, not a value.
+
+**COALESCE — the direct tool for "use this value if that one is null."** `COALESCE(company, 'Independent')` reads: *"give me `company`'s value — but if that's `NULL`, give me `'Independent'` instead."` It doesn't touch the row count at all; it only changes what shows up in that one column, for that one row, at display time.
+
+**CASE WHEN — the general-purpose version of the same idea.** `CASE WHEN company IS NULL THEN 'Independent' ELSE company END` says the exact same thing in a longer, more explicit form: an if/then/else that must be closed with `END` before it can be given an alias (`AS company_name`). `COALESCE` is really just shorthand for this exact "null → fallback" shape of `CASE`. `CASE` earns its keep once you need more than one condition (e.g. different fallback text depending on *which* field is missing, or ranges of values) — for a single null-check, `COALESCE` is the cleaner choice.
+
+**Both live inside one `SELECT`, not two.** A `CASE` expression is just another column-like item in the `SELECT` list — it needs a comma before/after it exactly like any other column, and everything (plain columns plus the `CASE`) has to sit inside a single `SELECT ... FROM customer`, not split into two separate `SELECT ... FROM customer` statements. An alias created in one `SELECT` statement does not exist in a second, separate `SELECT` statement — each statement is independent and only knows about its own columns.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Read the question and notice it never asks to exclude anyone** — "for every customer" is the tell that this is a substitution job, not a filtering job. That rules out `WHERE` immediately.
+2. **Identify what needs to change**: only the `company` column's *displayed value*, only when it's `NULL`. Everything else (`first_name`, `last_name`) passes through untouched.
+3. **Reach for `COALESCE(column, fallback_value)`** as the direct tool for "null → use this instead."
+4. **Alias the result** with `AS` so the output column has a clean, intentional name.
+5. **(Alternative) Reach for `CASE WHEN column IS NULL THEN fallback ELSE column END`** as the longer-form equivalent — useful to know since `CASE` generalizes to cases `COALESCE` can't handle.
+6. **Keep every piece — plain columns and the `CASE`/`COALESCE` expression — inside one `SELECT` list**, comma-separated, with a single `FROM customer` at the end.
+
+### Full solution
+
+```sql
+-- Option 1: COALESCE (direct, idiomatic for a single null-check)
+select first_name, last_name, coalesce(company, 'Independent') as company
+from customer;
+
+-- Option 2: CASE WHEN (general-purpose, same result)
+select first_name, last_name,
+    case when company is null then 'Independent'
+         else company
+    end as company_name
+from customer;
+```
+
+Both return the identical output: every customer's real company name where one exists, and "Independent" everywhere `company` was `NULL`.
+
+### The pattern to remember
+
+**"Show everyone, but change what displays for missing values" is a substitution problem, not a filtering problem — reach for `COALESCE` or `CASE WHEN`, never `WHERE`.** `WHERE` decides *who's in the result set*; `COALESCE`/`CASE` decide *what a value looks like* for whoever's already there. If the question would still make sense with "and don't lose anyone" tacked onto the end, that's the signal it's a substitution job.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Ask first: "does this question want fewer rows, or the same rows with different-looking values?"** The first is `WHERE`/`HAVING` territory; the second is `COALESCE`/`CASE` territory.
+- **Never quote `NULL`** in a comparison — `IS NULL` / `IS NOT NULL`, bare, always. Quoting it turns it into an identifier or a literal string, not the missing-value keyword.
+- **`CASE` always needs `END` before an alias can follow it** — treat `CASE ... END` as one inseparable unit, the same way an `IF` block needs a closing brace before anything can follow it.
+- **Only one `SELECT ... FROM` per query** — every output column, whether a plain column or a `CASE`/`COALESCE` expression, belongs in the same comma-separated list, not spread across multiple statements.
+- **Default to `COALESCE` for a single "if null, use X" case** — reach for `CASE WHEN` only once the logic needs more than one condition or more than two outcomes.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Tried `WHERE company IS "NULL"` first** — wrong tool (filters rows instead of substituting a value) *and* wrong syntax (`NULL` quoted as if it were an identifier). Corrected by working out what that query would actually return (only no-company customers) versus what the question asked for (every customer).
+- **Typo'd `coalese` instead of `coalesce`** — caught on inspection before running.
+- **Split the `CASE` version across two separate `SELECT ... FROM customer` statements**, expecting the alias from the first to carry into the second — aliases don't persist across separate statements; everything needed in the output has to live in one `SELECT` list.
+- **Left off `END`** before `AS company_name` on the first `CASE` attempt — `CASE` is not closed until `END` appears, so nothing can follow it (like an alias) until that happens.
+- **Wrote `first name` / `last name` with a space** instead of the actual column names (`first_name` / `last_name`) — an easy slip once attention shifts to the new `CASE` logic.
+- **Left a duplicate, non-existent `company_name` column reference in `SELECT`**, sitting alongside the `CASE ... AS company_name` that was actually defining it — `company_name` isn't a real column in `customer`; it only comes into existence via the `CASE` expression's alias, so it can only appear once.
+- **Missing comma** between `last_name` and the `CASE` expression — every item in a `SELECT` list, including a multi-line `CASE`, still needs the same comma separator as any other column.
 

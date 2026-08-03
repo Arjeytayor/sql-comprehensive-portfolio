@@ -77,3 +77,24 @@ on album.artist_id = artist.artist_id
 group by artist.artist_id
 having count(album.artist_id) > 5
 order by title_count DESC
+
+
+select count(*) as track_count,playlist.name
+  from playlist_track
+        inner join playlist
+  on playlist_track.playlist_id = playlist.playlist_id
+  group by playlist.playlist_id
+  having count(*) > 20
+  order by track_count desc
+
+
+select first_name,last_name, coalesce(company, 'Independent') as company
+from customer;
+
+
+Select first_name,last_name,
+   Case when
+  company is null then 'Independent'
+  else company
+  end as company_name
+  from customer;
