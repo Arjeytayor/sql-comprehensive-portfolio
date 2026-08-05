@@ -98,3 +98,25 @@ Select first_name,last_name,
   else company
   end as company_name
   from customer;
+
+
+  select concat (first_name,' ',last_name)
+  from customer
+  where email like '%gmail.com%';
+
+  select concat (first_name,' ',last_name)
+  from customer
+  where email like '%gmail.com';
+
+select upper(name),name from track;
+
+
+  select upper(name) as name_upper,name from track;
+
+select name from artist
+      where name ilike 'B%';
+
+select concat(city,', ',country) as city_country from customer;
+
+select composer from track
+where composer is null or trim(composer) = ''

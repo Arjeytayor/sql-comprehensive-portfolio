@@ -25,6 +25,11 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 4 | Ambiguous columns after JOIN, primary vs foreign key, "many-side" columns in SELECT | Chinook — Artists with more than 5 albums | Table-prefixing every shared column name, PK vs FK terminology, why a raw many-side column can't sit next to a GROUP BY |
 | 5 | FROM/JOIN role is about relationship, not row-count; duplicate GROUP BY keys with identical display names | Chinook — Playlists with more than 20 tracks | Why "pile you're counting" beats "bigger table" as the FROM/JOIN rule, why grouping by an ID can output two rows with the same visible name |
 | 6 | NULL replacement: WHERE vs. COALESCE vs. CASE WHEN | Chinook — Customers with no company on file | Why filtering (`WHERE`) and substituting (`COALESCE`/`CASE`) answer different questions; two ways to express the same substitution logic |
+| 7 | CONCAT syntax, LIKE/ILIKE wildcard mechanics, `IS` vs. pattern operators | Chinook — Full name + Gmail customers | Parentheses/separator arguments for `CONCAT`, `%`/`_` wildcard placement, case-sensitivity of `LIKE` vs. `ILIKE`, why quoted text needs a pattern operator, not `IS` |
+| 8 | Matching SELECT output to what the question literally asks for | Chinook — Track names in uppercase alongside original | A working function call can still under-deliver on the actual question; re-reading the question after writing a query that "runs fine" |
+| 9 | Wildcard placement (`%` vs. `_`) for "starts with," plus re-confirming LIKE/ILIKE case rules | Chinook — Artists starting with "B" (case-insensitive) | Why `_` (single character) is the wrong tool for "starts with," why `%` goes *after* the anchor letter, not around it |
+| 10 | Reusing CONCAT with a different separator | Chinook — City, country combined | Same function, different literal-text argument between values — confirms the pattern transfers, not just the one example |
+| 11 | TRIM for blank-vs-NULL, and why the combining operator must be OR not AND | Chinook — Tracks with NULL or blank composer | `''` vs. `NULL` are different kinds of "nothing"; why `TRIM(NULL)` never produces `''`, and why that makes `AND` silently fail |
 
 ---
 
@@ -589,4 +594,277 @@ Both return the identical output: every customer's real company name where one e
 - **Wrote `first name` / `last name` with a space** instead of the actual column names (`first_name` / `last_name`) — an easy slip once attention shifts to the new `CASE` logic.
 - **Left a duplicate, non-existent `company_name` column reference in `SELECT`**, sitting alongside the `CASE ... AS company_name` that was actually defining it — `company_name` isn't a real column in `customer`; it only comes into existence via the `CASE` expression's alias, so it can only appear once.
 - **Missing comma** between `last_name` and the `CASE` expression — every item in a `SELECT` list, including a multi-line `CASE`, still needs the same comma separator as any other column.
+
+---
+
+## 7. CONCAT Syntax, LIKE/ILIKE Wildcard Mechanics, and IS vs. Pattern Operators — Full Name + Gmail Customers
+
+### The question
+Using Chinook, show every customer's first and last name combined into one column, but only for customers whose email contains "gmail.com".
+
+### Why this one is a genuinely different shape again
+Entries 1-6 were all about *which rows survive* or *what a null value displays as*. This question introduces two new jobs at once: **gluing two text columns into one** (`CONCAT`), and **matching text by pattern instead of by exact value** (`LIKE`/`ILIKE`). Neither of these existed anywhere in the earlier entries, so every syntax rule here had to be built from zero rather than reused.
+
+### Real-world version of this same problem
+Imagine a printed directory that lists "First Name" and "Last Name" in two separate columns, but you want a single mailing label that reads "Jane Smith" — you're not changing any data, you're gluing two fields together with a space in between for display. Separately, imagine flipping through that same directory looking for anyone whose email ends in a specific provider's domain, without caring about the exact address — you're not checking for one exact match, you're checking for a *shape* the text has to fit. Those are two unrelated jobs (formatting output vs. pattern-matching input) that this single question happens to need together.
+
+### The concepts, explained from zero
+
+**`CONCAT(a, b, c, ...)` joins values, but inserts nothing between them automatically.** `CONCAT(first_name, last_name)` with no separator glues `"François"` and `"Tremblay"` straight together into `"FrançoisTremblay"` — no space appears unless you put one there yourself, as its own literal-text argument: `CONCAT(first_name, ' ', last_name)`. The whole argument list needs parentheses around it — `concat first_name, last_name` with no parentheses is a syntax error, not just untidy formatting.
+
+**`LIKE`/`ILIKE` compare text against a pattern, not an exact value — that's what the wildcards are for.**
+- `%` matches *any run of characters, including zero* — it's the "whatever else is here" wildcard.
+- `_` matches *exactly one character* — useful for fixed-length gaps, not used in this question but part of the same toolkit.
+- Placement changes what's being asserted: `'text%'` = starts with `text`; `'%text'` = ends with `text`; `'%text%'` = contains `text` anywhere. These are three different claims about the string, even though they look like small punctuation differences.
+
+**`LIKE` is case-sensitive; `ILIKE` is case-insensitive.** `LIKE '%GMAIL%'` will not match `gmail.com` in real data — the casing has to match literally. `ILIKE` runs the identical wildcard logic but ignores letter case entirely, so `'%GMAIL%'`, `'%Gmail%'`, and `'%gmail%'` all match the same rows under `ILIKE`.
+
+**`IS` is not a general comparison operator — it only ever checks against `NULL`, `TRUE`, `FALSE`, or `UNKNOWN`.** Writing `WHERE email IS gmail.com` is invalid for two independent reasons: `IS` doesn't accept a text value on its right side at all, and `gmail.com` with no quotes is read as an identifier reference (a nonexistent column/table name), not as text. Fixing only the quoting (`IS 'gmail.com'`) still fails, because `IS` never does text equality — that job belongs to `=` for exact matches or `LIKE`/`ILIKE` for pattern matches.
+
+**Double-quoted text is read as an identifier in Postgres, not as string data.** `WHERE email LIKE "gmail.com"` fails because Postgres treats double-quoted text as a reference to a column or table literally named `gmail.com` — which doesn't exist — producing a "column does not exist" error rather than a pattern-matching failure. This is the exact same mechanism that broke `WHERE company IS "NULL"` back in Entry #6 — double quotes always mean identifier, single quotes always mean text literal, no exceptions.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Split the question into its two separate jobs before writing anything**: (a) combine two columns into one display value, (b) filter rows by a text pattern. Trying to solve both at once in your head is where the confusion starts.
+2. **For the combine job, reach for `CONCAT`** and remember it needs its own separator argument — decide up front what should sit between the two names (here, a single space, `' '`).
+3. **For the filter job, ask: exact match, or pattern match?** "Contains gmail.com" is a pattern claim (something else could come before it), not an exact-value claim — that rules out `=` and rules in `LIKE`/`ILIKE`.
+4. **Decide wildcard placement by rephrasing the question in plain English first**: "contains" → wildcard on both sides, `'%gmail.com%'`. "Ends with" and "starts with" would each only need one side wildcarded.
+5. **Decide `LIKE` vs. `ILIKE` based on whether case should matter** — this question didn't specify, so either is defensible, but knowing which one enforces case-sensitivity was the actual thing being tested.
+6. **Combine both pieces in one `SELECT ... WHERE ...` statement** — the `CONCAT` goes in `SELECT`, the pattern match goes in `WHERE`, and neither depends on the other.
+
+### Full solution
+
+```sql
+SELECT CONCAT(first_name, ' ', last_name) AS full_name
+FROM customer
+WHERE email LIKE '%gmail.com%';
+```
+
+Returns 8 rows: François Tremblay, Helena Holý, Heather Leacock, Frank Ralston, Julia Barnett, Martha Silk, Dominique Lefebvre, Phil Hughes — identical whether the pattern is written `'%gmail.com%'` (contains) or `'%gmail.com'` (ends with), confirmed by actually re-running both live, since a domain like "gmail.com" can only ever appear at the very end of a real email address.
+
+### The pattern to remember
+
+**`CONCAT` glues values with no automatic spacing — every separator is a deliberate argument.** **`LIKE`/`ILIKE` compare against a pattern shape (built from `%` and `_`), never an exact value — `IS` and `=` are for exact matches only, and `IS` specifically only ever compares against `NULL`/`TRUE`/`FALSE`/`UNKNOWN`.** Whenever a question says "contains," "starts with," or "ends with," that's the signal to reach for `LIKE`/`ILIKE` with wildcards placed to match that exact phrasing.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Never assume `CONCAT` adds a space** — if the output needs one, write it as its own `' '` argument.
+- **Translate "contains / starts with / ends with" into wildcard placement before typing the pattern** — get the English phrasing right first, the `%` placement follows directly from it.
+- **Default to `LIKE` unless the question implies case shouldn't matter** — reach for `ILIKE` only when case-insensitivity is actually wanted.
+- **Never quote a value with double quotes expecting it to behave like text** — double quotes mean identifier in Postgres, always; text literals are always single-quoted.
+- **`IS` is reserved for `NULL`/`TRUE`/`FALSE`/`UNKNOWN`** — any other comparison, exact or pattern-based, needs `=` or `LIKE`/`ILIKE` instead.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Wrote `select concat first_name,last_name`** — missing the parentheses around the argument list entirely.
+- **Wrote `CONCAT(first_name, last_name)` with no separator** — produced names glued together with no space, since `CONCAT` never inserts one automatically.
+- **Wrote `WHERE email IS gmail.com`** — wrong operator (`IS` doesn't do text comparison at all) and unquoted text (read as a nonexistent identifier).
+- **Tried `"gmail.com"` (double-quoted)** — read as an identifier reference by Postgres, producing a column/table-not-found style error rather than a text mismatch.
+- **Tried `'gmail.com'` (single-quoted) with `IS`** — valid as text, but still wrong, since `IS` never performs text equality regardless of quoting.
+- **Initially stated ILIKE was the case-sensitive one** — backward; `LIKE` is case-sensitive, `ILIKE` is case-insensitive. Self-corrected once the two were explicitly contrasted.
+- **First wrote `'%gmail.com'` (ends-with) when the question asked "contains"** — happened to return the same rows here because a domain can only trail a real email address, but the wildcard placement didn't actually match the English phrasing of the question until corrected to `'%gmail.com%'`.
+
+---
+
+## 8. Matching SELECT Output to What the Question Literally Asks For — Track Names in Uppercase Alongside Original
+
+### The question
+Show every track's name in all uppercase, alongside its original name.
+
+### Why this one matters despite being "just one function"
+`UPPER()` itself was correct and used without hesitation on the first try — genuine evidence the string-function category is starting to stick. The actual lesson here isn't about the function at all: it's that **a query can run without errors, return a plausible-looking result, and still fail the question**, if the output doesn't contain everything that was actually asked for. This is a different failure mode from every earlier entry — not a syntax mistake, not a wrong table, not a wrong clause — just under-reading the question after the query "worked."
+
+### Real-world version of this same problem
+Imagine being asked to hand someone a printout with a phone number both formatted and in its raw form, "so they can compare the two." Handing over a printout with only the formatted version technically answers *part* of the request — it even looks complete — but it silently drops the "alongside the original" half of the ask. Nothing about the printout looks broken; the gap only shows up when you re-read the original request side-by-side with what you actually produced.
+
+### The concept, explained from zero
+
+**`UPPER(column)` converts text to all-uppercase, and only returns that one transformed value** — it doesn't remember or carry along the original alongside it automatically. If a question asks for the transformed value *and* the original, both have to be named explicitly in the `SELECT` list, comma-separated, exactly like any other pair of columns: `SELECT UPPER(name), name FROM track;`. The function call is just one item in the list; it doesn't entitle you to the source column for free.
+
+**"Runs successfully" and "answers the question" are two different checks.** A query with no syntax errors that returns real rows has only cleared the first bar. The second check — does the output actually contain everything the question named — has to be done deliberately, by re-reading the question after the query executes, not assumed from the query having worked.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Identify the transformation needed**: "in all uppercase" → `UPPER()`. This part came immediately and correctly.
+2. **Write the first-pass query and run it**: `SELECT UPPER(name) FROM track;` — runs cleanly, returns a full column of uppercase names.
+3. **Re-read the original question against the actual output** — the question says "alongside its original name," and the output has only one column. That's the gap, not a syntax problem.
+4. **Add the missing column to the same `SELECT` list**: `SELECT UPPER(name), name FROM track;` — both values now appear per row, side by side.
+
+### Full solution
+
+```sql
+SELECT UPPER(name) AS name_upper, name
+FROM track;
+```
+
+(An alias like `name_upper` isn't strictly required — `SELECT UPPER(name), name FROM track;` runs identically and was accepted as correct — but naming the transformed column makes the two side-by-side columns unambiguous in the output headers.)
+
+### The pattern to remember
+
+**A working query is not proof the question was fully answered — re-read the question against the actual columns in the output, every time, before moving on.** Any time a question uses the word "alongside," "compared to," "as well as," or "next to," that's a signal the output needs *multiple* columns, and it's worth explicitly counting how many things were asked for before calling the query done.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Count the deliverables in the question before writing `SELECT`** — "uppercase name, alongside original name" is two deliverables, not one, even though it reads as a single sentence.
+- **After a query runs successfully, re-read the question one more time against the actual result columns** — a clean run is not the same as a complete answer.
+- **Watch for comparison/pairing language ("alongside," "vs.," "next to," "compared with") as a trigger that multiple columns are required in the output.**
+
+### Mistakes made this time (new ones, not repeats)
+
+- **First query only selected `UPPER(name)`**, omitting the plain `name` column the question explicitly asked to show "alongside" the uppercase version — caught by re-reading the question against the query's actual output, not by any error message, since the query itself was syntactically correct.
+
+---
+
+## 9. Wildcard Placement (% vs. _) for "Starts With," Plus Re-Confirming LIKE/ILIKE Case Rules — Artists Starting With "B"
+
+### The question
+Find every artist whose name starts with the letter "B", case-insensitive.
+
+### Why this one matters despite being "just another LIKE question"
+Entry #7 already covered `LIKE`/`ILIKE` mechanics once, on a "contains" question. This entry is the same toolkit applied to a **different wildcard shape** ("starts with" instead of "contains"), and it surfaced a mistake that hadn't shown up yet: reaching for `_` (single-character wildcard) as if it were a general-purpose "mark where the letter goes" tool, rather than understanding it strictly means *exactly one character, no more, no less*.
+
+### Real-world version of this same problem
+Think of a phone book sorted A-Z, and someone asks "give me everyone in the B section." You wouldn't scan for people who merely *have* a B somewhere in their name (that's a different, much broader request) — you'd only check the very first letter of each name. "Starts with" is a claim about *position* (what's the first character), not about *presence* (does this letter show up anywhere at all).
+
+### The concept, explained from zero
+
+**`_` matches exactly one character — it is not a stand-in for "the letter goes here, and other stuff can surround it."** `'_B'` reads literally as "exactly one arbitrary character, immediately followed by the letter B, and then nothing else" — it would only match a two-character name like "AB" or "xB", not "Black Sabbath" or "BackBeat." The instinct to reach for `_` came from thinking of it as a flexible marker for "somewhere around here" — but `_` is the *least* flexible wildcard: one slot, one character, always.
+
+**`%` matches any run of characters, including zero — that's the tool for "and then anything else follows."** A "starts with B" claim has two parts: (1) B is the very first character, and (2) after that, literally anything of any length (or nothing at all) can follow. Part 1 is satisfied by writing `B` literally, first, with nothing before it. Part 2 is satisfied by `%` immediately after it: `'B%'`.
+
+**Wildcard placement always mirrors the plain-English shape of the claim being made:**
+- "Starts with B" → the anchor (`B`) comes first, `%` trails after it → `'B%'`.
+- "Ends with B" → `%` leads, anchor trails → `'%B'`.
+- "Contains B" → anchor is sandwiched, `%` on both sides → `'%B%'`.
+- "Exactly one character, then B" (a genuinely different, narrower claim) → `'_B'` — this is correct only when the question truly means "any single character, followed immediately by B," not as a general substitute for "somewhere."
+
+**LIKE vs. ILIKE case rules, re-confirmed after an earlier reversal.** Restated correctly this time: `LIKE` is case-sensitive (exact letter case must match), `ILIKE` ignores case entirely. Since the question explicitly asked for case-insensitive matching, `ILIKE` was the correct choice — `LIKE 'B%'` would have missed any artist name that happened to be lowercase-first, even though none actually existed in this particular result set.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Translate "starts with" into a plain-English two-part claim**: (1) first character is B, (2) anything can follow.
+2. **Write the anchor literally, in position**: `B` as the first character of the pattern, no wildcard before it.
+3. **Attach `%` immediately after the anchor** to cover "anything (or nothing) follows": `'B%'`.
+4. **Reject `_` once tested against what it actually matches** — walking through `'_B'` character-by-character revealed it demands exactly one character before B and nothing after, which doesn't match the question's actual shape at all.
+5. **Choose `ILIKE` over `LIKE`** because the question explicitly said case-insensitive.
+6. **Wrap the pattern in single quotes** — corrected from an initial unquoted `%B%`, which would have been read as a broken expression rather than a text pattern (same underlying rule as Entry #7: single quotes for text literals, always).
+
+### Full solution
+
+```sql
+SELECT name
+FROM artist
+WHERE name ILIKE 'B%';
+```
+
+Returns 21 artists, all genuinely starting with "B" (BackBeat, Billy Cobham, Black Sabbath, Body Count, Bruce Dickinson, Buddy Guy, Bebel Gilberto, Baby Consuelo, Banda Black Rio, Barão Vermelho, Battlestar Galactica, Battlestar Galactica (Classic), Big & Rich, Black Eyed Peas, Ben Harper, and several full-orchestra names starting with "Berliner"/"Britten"/"Barry"/"Boston").
+
+### The pattern to remember
+
+**Wildcard placement is a direct translation of where the "anything goes" part of the claim sits in plain English — anchor text stays literal and fixed, `%` covers the open-ended part, and `_` is reserved for when the claim genuinely specifies an exact single-character gap, not as a general "somewhere around here" tool.**
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Before writing the pattern, state the claim in plain English as "position + open-endedness"** — "starts with X" = X first, open after; "ends with X" = open before, X last; "contains X" = open on both sides.
+- **Test `_` by asking "does this claim really mean exactly one character, or does it mean 'any number of characters'?"** — if the answer is "any number," `_` is the wrong tool regardless of how tempting it looks.
+- **Re-check LIKE vs. ILIKE against the question's explicit wording every time** — "case-insensitive" in the question is a direct instruction to use `ILIKE`, not a detail to infer from the data.
+- **Always single-quote the pattern string** — an unquoted pattern is a broken expression, not "a pattern SQL will figure out."
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Wrote the pattern unquoted** (`like %B%`) — corrected by recalling the single-quote-for-text-literal rule from Entry #7.
+- **Briefly restated LIKE/ILIKE case-sensitivity backward again** ("LIKE for case insensitive, ILIKE for case sensitive") before self-correcting once asked to walk back through the earlier confirmed rule — the same reversal from Entry #7, now surfaced a second time, suggesting this specific pairing needs one more deliberate cold-recall check before it's fully settled.
+- **Reached for `_` as the tool for "starts with"** — treating it as a flexible placeholder for "the letter goes around here somewhere" rather than its actual strict meaning (exactly one character). Corrected by tracing what `'_B'` would literally require character-by-character, which made the mismatch with "starts with" obvious.
+- **First pattern attempt was `'%B%'` (contains) instead of `'B%'` (starts with)** — matches a broader, wrong claim; corrected once the plain-English "anchor position + open-endedness" framing was applied.
+
+---
+
+## 10. Reusing CONCAT With a Different Separator — City, Country Combined
+
+### The question
+Show each customer's city and country combined into one column, formatted like `"Berlin, Germany"`.
+
+### Why this one matters despite being "the same function again"
+This is deliberately the same `CONCAT` skill from Entry #7, applied cold to a new pair of columns with a *different* separator (`', '` instead of `' '`). It came out correct on the first attempt, with no hesitation — real evidence that `CONCAT`'s "you must supply your own separator" rule generalized, rather than being memorized as "always put a space between names."
+
+### The concept, reinforced
+**The separator is just another literal-text argument — it changes based on what the output format actually needs, not a fixed part of `CONCAT`'s syntax.** Entry #7 needed `' '` (a single space) to glue a first and last name into one readable name. This question needed `', '` (comma-space) to glue city and country into the conventional "City, Country" format. Nothing about `CONCAT` itself changed — only the literal string passed as the middle argument, chosen to match the punctuation the output format called for.
+
+### Full solution
+
+```sql
+SELECT CONCAT(city, ', ', country) AS city_country
+FROM customer;
+```
+
+Returns 57 rows in the form "São José dos Campos, Brazil", "Berlin, Germany", "London, United Kingdom", etc. — comma-space separator applied consistently, exactly matching the requested format.
+
+### The pattern to remember
+
+**Any time a question specifies an exact output format (`"X, Y"`, `"X - Y"`, `"X (Y)"`), the punctuation between the pieces just becomes `CONCAT`'s next literal-text argument — read the required format first, then write that exact string as the separator.**
+
+### Mistakes made this time
+
+None — first attempt was correct, confirming the separator-argument rule from Entry #7 transferred cleanly to a new column pair and a new separator string.
+
+---
+
+## 11. TRIM for Blank-vs-NULL, and Why the Combining Operator Must Be OR Not AND — Tracks With NULL or Blank Composer
+
+### The question
+Find every track whose `composer` field is `NULL` or blank — trim any stray whitespace from `composer` first, in case blanks are hiding as spaces.
+
+### Why this one is a genuinely new shape
+Earlier entries dealt with `NULL` alone (Entry #6) or pattern-matching real text (Entries #7, #9). This question introduces a new function (`TRIM`) *and* a subtlety that doesn't show up until you actually reason about what `TRIM` does to a row that has no value at all — which is exactly where the first instinct (`AND`) quietly breaks.
+
+### Real-world version of this same problem
+Imagine sorting a stack of forms into "needs follow-up" if the "referred by" field is either left completely blank on the page, or has been filled in with just a few meaningless spaces (someone tapped the spacebar and walked away). You're not looking for two different kinds of problems that both have to be true on the same form — a single form is either missing the field entirely, *or* has it present-but-empty. It's never both at once, because a form that has nothing written can't simultaneously "have some spaces, once trimmed, that come out blank" — there's nothing there to trim in the first place.
+
+### The concept, explained from zero
+
+**`TRIM(column)` strips leading and trailing whitespace, leaving the middle untouched.** `TRIM('  John Lennon  ')` → `'John Lennon'`. `TRIM('    ')` (all spaces, nothing else) → `''` (empty string) — collapsing a "blank-looking" value down to something that's directly comparable with `= ''`.
+
+**`NULL` and `''` are two different kinds of "nothing," and `TRIM` cannot convert one into the other.** `''` is an empty string — an actual value that exists, it simply has zero characters. `NULL` means no value was ever recorded — there's nothing there to even look at. `TRIM(NULL)` reflects this: you cannot strip whitespace off of something that isn't there, so `TRIM(NULL)` evaluates to `NULL`, never to `''`. This is the crux of the whole question.
+
+**Why this makes `AND` fail silently, without an error.** Consider a row where `composer IS NULL`:
+- The first half of `composer IS NULL AND TRIM(composer) = ''` is `TRUE`.
+- The second half, `TRIM(composer) = ''`, requires comparing `NULL = ''` — which is never `TRUE` (comparisons against `NULL` come out unknown, not true or false) — so this half is not `TRUE`.
+- `TRUE AND (not TRUE)` is not `TRUE` — the whole row gets thrown out, even though it's exactly the kind of row the question wants included.
+
+`AND` doesn't error here — it just quietly excludes every genuinely-`NULL` composer row, which is worse than an error because the query *looks* like it worked.
+
+**Why `OR` is correct instead.** With `composer IS NULL OR TRIM(composer) = ''`, a row only needs *one* side to be true. A `NULL` row satisfies the first half and is included, regardless of what the second half evaluates to. A row with `'    '` (only spaces) fails the first half (it's not `NULL`) but satisfies the second half once trimmed. Every row that's actually blank-or-missing gets caught by at least one side.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Split "NULL or blank" into two separate, testable conditions**: `composer IS NULL`, and `TRIM(composer) = ''` (after stripping stray whitespace).
+2. **First attempt combined them with `AND`** — an assumption borrowed from ordinary English ("check for null-ness and blankness") rather than tested against an actual row.
+3. **Tested that assumption against one concrete `NULL` row** by asking "what does `TRIM(NULL)` actually evaluate to?" — answer: `NULL`, not `''`, because there's nothing there to trim.
+4. **Traced through what that means for the `AND`**: the second half can never be `TRUE` for a `NULL` row, so the whole `AND` condition can never be `TRUE` for that row — meaning every real `NULL` row would silently vanish from the results.
+5. **Switched to `OR`**, since the question only needs *either* condition to hold per row, never both at once.
+
+### Full solution
+
+```sql
+SELECT composer
+FROM track
+WHERE composer IS NULL OR TRIM(composer) = '';
+```
+
+Returns every track with a missing or blank-after-trimming composer — a large result set of empty-looking `composer` values, confirming the filter caught both the genuinely-`NULL` rows and any whitespace-only rows.
+
+### The pattern to remember
+
+**"X is missing, or X is present-but-blank" is always an `OR`, never an `AND` — because no single row can be both `NULL` and non-`NULL` (blank-but-present) at the same time. Test any `AND`/`OR` choice by picking one concrete row and asking whether both halves of the condition could actually be true for it simultaneously — if they can't, `AND` is wrong.**
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Before combining two conditions with `AND` or `OR`, pick one concrete row and ask: "can both halves be true for this row at once?"** If yes, `AND` is likely right (or is at least possible); if no, `OR` is required.
+- **Remember `TRIM(NULL)` is `NULL`, not `''`** — trimming can only act on a value that exists; it can't manufacture an empty string out of nothing.
+- **"Blank" and "missing" are different states in SQL** — `''` is a real, zero-length value; `NULL` is the absence of any value. A check for one does not automatically catch the other.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **First wrote `WHERE TRIM(column_name)` with no comparison at all** — `TRIM()` alone isn't a boolean condition; `WHERE` always needs something evaluated against a value (`= ''`, `IS NULL`, etc.), not just a bare function call.
+- **Combined `composer IS NULL` and `TRIM(composer) = ''` with `AND`** — assumed from ordinary English phrasing ("null and blank") rather than tested against a concrete row; correctly reasoned to `OR` once asked to trace what `TRIM(NULL)` actually evaluates to and whether both halves could be true together.
 
