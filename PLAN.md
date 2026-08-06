@@ -41,10 +41,10 @@
 **CTA:** Write every query as a saved `.sql` file in `01-Fundamentals/` as you go — don't just run-and-discard in a scratch tab. This becomes your GitHub commit history and proof of range later.
 
 **KPIs**
-- [ ] ≥20 fundamentals queries saved in `01-Fundamentals/queries.sql` (or one file per topic)
-- [ ] Can explain, in your own words, why `HAVING` exists when `WHERE` already filters
+- [x] ≥20 fundamentals queries saved in `01-Fundamentals/queries.sql` (or one file per topic) — 22 queries saved as of 2026-08-05
+- [x] Can explain, in your own words, why `HAVING` exists when `WHERE` already filters — demonstrated across MASTER-GUIDE Entries #2–#3
 - [ ] ≥10 DataLemur easy questions solved (profile shows it publicly)
-- [ ] First GitHub commit pushed (plain `git commit -m "..."`, no co-author trailer)
+- [x] First GitHub commit pushed (plain `git commit -m "..."`, no co-author trailer)
 
 ---
 

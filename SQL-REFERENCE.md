@@ -17,6 +17,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 5 | String Operator | `ILIKE` |
 | 6 | Comparison Operator | `IS NULL` / `IS NOT NULL` |
 | 7 | Wildcard Reference | `%` and `_` placement, all four shapes |
+| 8 | String Function | `TRIM` |
 
 ---
 
@@ -168,3 +169,24 @@ This is a genuine, correct filter — it belongs on questions that ask "which ro
 **Why `_` is the wrong tool for "starts with" (a real mistake, worth remembering):** `_B` was first reached for as a way to say "B goes here, roughly" when solving Entry #9's "starts with B" question. But `_` demands *exactly one* character in that slot and nothing else in the whole pattern — `'_B'` only ever matches 2-character strings like "AB" or "xB". It cannot match "Black Sabbath," because `_` isn't a flexible "somewhere around here" marker — it's the strictest wildcard available, pinned to one exact character. `%` is the one that means "any number of characters, including many or none" — that's what "starts with" actually needs after the anchor letter.
 
 **Combining both wildcards is valid too (not yet used in a real question, but worth knowing):** `'_a%'` means "any one character, then a literal `a`, then anything after" — e.g. matches "bat" (`b` = the one character, `a` = literal, `t` = the rest) and "cabin" (`c` = the one character, `a` = literal, `bin` = the rest), but not "at" (nothing sits before the `a`). Useful once a pattern needs to pin down more than one position at a time.
+
+---
+
+## 8. `TRIM(column)` — String Function
+
+**What it does:** Strips leading and trailing whitespace from a string, leaving the middle untouched. `TRIM('  John Lennon  ')` → `'John Lennon'`. On a string that's *only* whitespace, `TRIM('    ')` → `''` (empty string) — this is what makes it useful for catching "blank" values that are hiding as spaces rather than being genuinely empty.
+
+**Form used so far:**
+```sql
+select composer from track
+where composer is null or trim(composer) = ''
+```
+Catches every track whose composer is either genuinely missing (`NULL`) or present but blank once whitespace is stripped (`''` after trimming).
+
+**Other forms it supports (not yet used here):**
+- `TRIM(LEADING FROM column)` / `TRIM(TRAILING FROM column)` — strip only one side instead of both.
+- `TRIM(BOTH 'x' FROM column)` — strip a specific character instead of whitespace (defaults to whitespace if no character is given).
+
+**What it can't do:**
+- **Cannot turn `NULL` into `''`.** `TRIM(NULL)` evaluates to `NULL`, never to an empty string — there's nothing there to strip whitespace off of. This is why a "missing or blank" check always needs `column IS NULL OR TRIM(column) = ''` (two separate conditions joined with `OR`), never `TRIM(column) = ''` alone (misses genuine `NULL` rows) and never joined with `AND` (see Entry #11 in MASTER-GUIDE — `AND` silently excludes every `NULL` row, since the second half can never be `TRUE` for one).
+- Only strips whitespace (or a named character) from the two ends — doesn't collapse repeated spaces in the middle of a string (`'John   Lennon'` stays `'John   Lennon'` after `TRIM`).
