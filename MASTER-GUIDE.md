@@ -30,6 +30,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 9 | Wildcard placement (`%` vs. `_`) for "starts with," plus re-confirming LIKE/ILIKE case rules | Chinook — Artists starting with "B" (case-insensitive) | Why `_` (single character) is the wrong tool for "starts with," why `%` goes *after* the anchor letter, not around it |
 | 10 | Reusing CONCAT with a different separator | Chinook — City, country combined | Same function, different literal-text argument between values — confirms the pattern transfers, not just the one example |
 | 11 | TRIM for blank-vs-NULL, and why the combining operator must be OR not AND | Chinook — Tracks with NULL or blank composer | `''` vs. `NULL` are different kinds of "nothing"; why `TRIM(NULL)` never produces `''`, and why that makes `AND` silently fail |
+| 12 | EXTRACT for date parts, alias visibility across SELECT/GROUP BY/HAVING/ORDER BY | Chinook — Invoices per year, more than 30, busiest year first | Why a SELECT-list alias can't be referenced by another item in the *same* SELECT list, but can be used in `ORDER BY`; `COUNT(*)` for "how many rows," not `COUNT(alias)` |
 
 ---
 
@@ -867,4 +868,83 @@ Returns every track with a missing or blank-after-trimming composer — a large 
 
 - **First wrote `WHERE TRIM(column_name)` with no comparison at all** — `TRIM()` alone isn't a boolean condition; `WHERE` always needs something evaluated against a value (`= ''`, `IS NULL`, etc.), not just a bare function call.
 - **Combined `composer IS NULL` and `TRIM(composer) = ''` with `AND`** — assumed from ordinary English phrasing ("null and blank") rather than tested against a concrete row; correctly reasoned to `OR` once asked to trace what `TRIM(NULL)` actually evaluates to and whether both halves could be true together.
+
+---
+
+## 12. EXTRACT for Date Parts, and Alias Visibility Across SELECT/GROUP BY/HAVING/ORDER BY — Invoices Per Year
+
+### The question
+Using Chinook, find how many invoices happened in each year — keep only years with more than 30 invoices, busiest year first.
+
+### Why this one needs a new function, and re-tests an old rule from a new angle
+Every earlier entry worked with text (`LIKE`, `CONCAT`, `TRIM`) or plain equality (`IS NULL`). This question is the first to touch a **date/timestamp** column, which introduces `EXTRACT` as a genuinely new function. It also drags the alias-visibility rule from Entry #2 (`HAVING` can't see `SELECT` aliases) back out, but in a new, sneakier shape: this time the trap wasn't `HAVING` at all — it was one item in the `SELECT` list trying to reference *another* item's alias, in that same list, before either had finished being built.
+
+### Real-world version of this same problem
+Think of a big ledger of receipts, each stamped with a full date like "14th March 2023, 10:42am." If someone asks "how many receipts came in each year, but only years with more than 30," you wouldn't retype every date by hand to pull out just the year — you'd point at the part of the stamp that already says "2023" and read off just that piece. That's `EXTRACT`: the date is already structured into named parts (year, month, day...), so getting the year is "read the label," not "cut apart some text."
+
+### The concept, explained from zero
+
+**`invoice_date` is a structured date/timestamp value, not plain text and not a number.** It's stored in a shape like `yyyy-mm-dd hh:mm:ss`, with year, month, day, hour, minute, and second already existing as distinct, named components — not characters at fixed positions to slice out, and not a bare integer to do math on.
+
+**`EXTRACT(part FROM column)` reads off one of those named parts.** `EXTRACT(year FROM invoice_date)` returns just the year as a number, discarding month/day/time entirely. The keyword `FROM` inside the parentheses works the same way it does in `TRIM(BOTH 'x' FROM column)` — it's the same "which column this operates on" syntax shape, reused.
+
+**A `SELECT`-list alias can't be referenced by another item in the *same* `SELECT` list.** `SELECT EXTRACT(year FROM invoice_date) AS year, COUNT(year) FROM invoice ...` fails with "column year does not exist" — not because `year` is a bad alias, but because Postgres evaluates each item in the `SELECT` list independently; `COUNT(year)` goes looking for a real column named `year` in the `invoice` table, finds none, and errors. This is the mirror image of Entry #2's `HAVING`-can't-see-`SELECT`-aliases rule: it's not just "later clauses can't see `SELECT` aliases," it's "nothing inside `SELECT` can see another `SELECT` item's alias either, since they're all built at the same time, not one after another."
+
+**`COUNT(*)` counts rows, not a specific column's values.** Since the real goal was "how many invoices," not "how many values are in a column called year," the fix wasn't renaming anything — it was swapping `COUNT(year)` for `COUNT(*)`, which counts every row in the group regardless of column.
+
+**`GROUP BY` and `ORDER BY` *can* use a `SELECT` alias, even though other `SELECT` items can't.** `GROUP BY year` and `ORDER BY year DESC` both worked using the alias, because Postgres specifically allows `GROUP BY`/`ORDER BY` to reference output column names as a convenience — different treatment from a plain expression sitting inside the `SELECT` list itself.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Translate "how many invoices happened in each year" into its two working pieces**: (a) pull just the year out of `invoice_date` — `EXTRACT(year FROM invoice_date)`; (b) count rows per year — `COUNT(*)` with a `GROUP BY`.
+2. **First attempt tried `COUNT(year)`**, reusing the alias from the `EXTRACT` expression sitting right above it — ran, and immediately errored with "column year does not exist."
+3. **Traced the error back to what `year` actually is**: an alias invented in this query, not a real column in `invoice` — so nothing in the same `SELECT` list can reference it yet.
+4. **Swapped to `COUNT(*)`**, since the actual goal was "count rows," not "count values in a column called year."
+5. **Added `ORDER BY count(*) DESC`** to put the busiest year first — worked directly, no alias needed since it referenced the raw aggregate expression.
+6. **Tested whether `ORDER BY year DESC` (the alias) would also work**, reasoning it through first: `ORDER BY` runs after `SELECT`, so the alias should already exist by then — confirmed correct by running it.
+7. **Added `HAVING count > 30`** — first attempt omitted the parentheses (`count` isn't a valid function call by itself), corrected to `HAVING count(*) > 30` by comparing it against every other `count(*)` already written correctly elsewhere in the same query.
+
+### Hand-trace through the actual result
+
+`invoice` has 5 distinct years, each holding roughly 80 invoices:
+
+| year | count(*) |
+|---|---|
+| 2021 | 83 |
+| 2022 | 83 |
+| 2023 | 83 |
+| 2024 | 83 |
+| 2025 | 80 |
+
+After `HAVING count(*) > 30`: all 5 years survive (every year comfortably clears 30).
+After `ORDER BY year DESC`: rows re-sorted to 2025, 2024, 2023, 2022, 2021 — most recent year first.
+
+### Full solution
+
+```sql
+select EXTRACT(year FROM invoice_date) AS year,
+  count(*)
+from invoice
+group by year
+having count(*) > 30
+order by year desc;
+```
+
+### The pattern to remember
+
+**`EXTRACT(part FROM date_column)` reads a named component off a structured date value — no slicing, no character counting, just naming the part you want.** **A `SELECT`-list alias is invisible to every other item in that same `SELECT` list (just like it's invisible to `WHERE`/`HAVING`), but becomes visible the moment a later clause — `GROUP BY`, `HAVING`'s aggregate aside, or `ORDER BY` — runs after `SELECT` has finished building.** When in doubt about whether an alias can be used somewhere, ask: "has `SELECT` already finished running by the time this clause executes?"
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Recognize "per year / per month / per day" phrasing as an `EXTRACT` + `GROUP BY` question** — pull the date part first, then group and aggregate on it exactly like grouping on any other column.
+- **Never reference one `SELECT`-list alias from inside another item in the same `SELECT` list** — if you need the same expression twice, repeat the full expression, don't assume the alias is live yet.
+- **`COUNT(*)` for "how many rows" — `COUNT(column)` only when you specifically want to count non-`NULL` values in a real column.** If the column name being counted is actually just an invented alias, that's the tell something's wrong.
+- **`GROUP BY` and `ORDER BY` are the two clauses that *do* accept `SELECT` aliases** — `WHERE`, `HAVING`, and other `SELECT` items do not. When stuck, ask "does this clause run before or after `SELECT` finishes?"
+- **Any bare aggregate name used in a comparison (`having count > 30`) needs its parentheses** — `count` alone isn't a function call, `count(*)` is.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Guessed `EXTRACT` worked like character-slicing** (`LEFT`/`RIGHT`, counting characters) before confirming `invoice_date` was a structured date/timestamp value, not text — corrected by checking the actual column output shape first.
+- **Wrote `count(year)`**, referencing the `EXTRACT(...) AS year` alias from the same `SELECT` list — triggered "column year does not exist," since that alias isn't a real column and isn't visible yet to a sibling `SELECT` item. Fixed by switching to `COUNT(*)`.
+- **Wrote `having count > 30`** — omitted the parentheses that make `count` an actual function call. Caught by comparing it against the correctly-formed `count(*)` already used earlier in the same query.
 

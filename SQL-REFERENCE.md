@@ -18,6 +18,10 @@ New sections get added only after a concept has actually been practiced in a rea
 | 6 | Comparison Operator | `IS NULL` / `IS NOT NULL` |
 | 7 | Wildcard Reference | `%` and `_` placement, all four shapes |
 | 8 | String Function | `TRIM` |
+| 9 | Date Function | `EXTRACT` |
+| 10 | Aggregate Function | `COUNT` |
+| 11 | Clause | `ORDER BY` |
+| 12 | Clause | `HAVING` |
 
 ---
 
@@ -190,3 +194,90 @@ Catches every track whose composer is either genuinely missing (`NULL`) or prese
 **What it can't do:**
 - **Cannot turn `NULL` into `''`.** `TRIM(NULL)` evaluates to `NULL`, never to an empty string — there's nothing there to strip whitespace off of. This is why a "missing or blank" check always needs `column IS NULL OR TRIM(column) = ''` (two separate conditions joined with `OR`), never `TRIM(column) = ''` alone (misses genuine `NULL` rows) and never joined with `AND` (see Entry #11 in MASTER-GUIDE — `AND` silently excludes every `NULL` row, since the second half can never be `TRUE` for one).
 - Only strips whitespace (or a named character) from the two ends — doesn't collapse repeated spaces in the middle of a string (`'John   Lennon'` stays `'John   Lennon'` after `TRIM`).
+
+---
+
+## 9. `EXTRACT(part FROM column)` — Date Function
+
+**What it does:** Reads off one named component (year, month, day, hour, minute, second...) from a structured date/timestamp value. Doesn't slice characters and doesn't do math — the date is already broken into these parts internally, `EXTRACT` just returns the one you name.
+
+**Form used so far:**
+```sql
+select EXTRACT(year FROM invoice_date) AS year
+from invoice;
+```
+Returns just the year (e.g. `2023`) for every invoice, discarding month/day/time entirely.
+
+**Other forms it supports (not yet used here):**
+- Other parts: `EXTRACT(month FROM column)`, `EXTRACT(day FROM column)`, `EXTRACT(hour FROM column)`, `EXTRACT(dow FROM column)` (day of week), etc.
+- Can be used in `WHERE`/`HAVING` too, not just `SELECT`.
+
+**What it can't do:**
+- Only works on an actual date/timestamp-typed column — not on a plain text or integer column pretending to hold a date.
+- The extracted result is invisible to other items in the *same* `SELECT` list if aliased — see the `AS year` / `COUNT(year)` trap logged in MASTER-GUIDE Entry #12. Only `GROUP BY`/`ORDER BY` can reference that alias, not a sibling `SELECT` expression.
+
+---
+
+## 10. `COUNT(*)` / `COUNT(column)` — Aggregate Function
+
+**What it does:** Tallies rows. `COUNT(*)` counts every row in a group, regardless of any column's value. `COUNT(column)` counts only the rows where that specific column is non-`NULL` — a narrower, different count.
+
+**Form used so far:**
+```sql
+select EXTRACT(year FROM invoice_date) AS year,
+  count(*)
+from invoice
+group by year;
+```
+Counts how many invoice rows fall into each year-group.
+
+**Other forms it supports (not yet used here):**
+- `COUNT(column)` — count of non-`NULL` values in a specific column (different from `COUNT(*)` whenever that column has `NULL`s).
+- `COUNT(DISTINCT column)` — count of unique non-`NULL` values only.
+
+**What it can't do:**
+- `COUNT(alias)` doesn't work if `alias` isn't a real column — Postgres looks for an actual column by that name and errors if it's just something invented earlier in the same `SELECT` list (see MASTER-GUIDE Entry #12).
+- Like any aggregate, only meaningful alongside `GROUP BY` when you want a count *per group* — without `GROUP BY`, `COUNT(*)` collapses the whole table into a single number.
+
+---
+
+## 11. `ORDER BY column [ASC|DESC]` — Clause
+
+**What it does:** Sorts the final result set. `ASC` (ascending, smallest/earliest first) is the default if omitted; `DESC` (descending, largest/latest first) has to be written explicitly.
+
+**Form used so far:**
+```sql
+... order by year desc;
+... order by count(*) desc;
+```
+Both work — one sorts by the `year` alias, the other by the raw `count(*)` aggregate expression.
+
+**Other forms it supports (not yet used here):**
+- Multiple sort keys: `ORDER BY column1 DESC, column2 ASC` — ties in the first column get broken by the second.
+- Can sort by column position number (`ORDER BY 1`) — not recommended for readability.
+
+**What it can't do:**
+- Nothing exotic here, but worth remembering *why* it's flexible: `ORDER BY` runs after `SELECT` has finished building the output, so it can reference either a `SELECT`-list alias or the raw underlying expression — unlike `WHERE`/`HAVING`, or other items inside the same `SELECT` list, which run before the alias exists.
+
+---
+
+## 12. `HAVING aggregate_expression comparison` — Clause
+
+**What it does:** Filters *groups* after `GROUP BY` has already formed them, based on an aggregate value (a count, sum, average...). This is different from `WHERE`, which filters individual rows *before* grouping happens.
+
+**Form used so far:**
+```sql
+... group by year
+having count(*) > 30
+order by year desc;
+```
+Keeps only year-groups with more than 30 invoices.
+
+**Other forms it supports (not yet used here):**
+- Any aggregate, not just `COUNT`: `HAVING AVG(column) > x`, `HAVING SUM(column) < y`.
+- Multiple conditions: `HAVING COUNT(*) > 30 AND AVG(total) > 5`.
+
+**What it can't do:**
+- Never sees a `SELECT`-list alias — always needs the raw aggregate expression repeated (`HAVING COUNT(*) > 30`, not `HAVING year_count > 30`), because `HAVING` runs before `SELECT` creates that alias.
+- A bare aggregate name with no parentheses (`HAVING count > 30`) is not a valid function call — always needs `count(*)` or `count(column)`.
+- Can't be used without `GROUP BY` to filter on a per-row basis — that job belongs to `WHERE`.

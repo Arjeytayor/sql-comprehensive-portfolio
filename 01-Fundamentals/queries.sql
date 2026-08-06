@@ -120,3 +120,12 @@ select concat(city,', ',country) as city_country from customer;
 
 select composer from track
 where composer is null or trim(composer) = ''
+
+select invoice_date from invoice;
+
+select EXTRACT(year FROM invoice_date) AS year,
+  count(*)
+from invoice
+group by year
+having count(*) > 30
+order by year desc;
