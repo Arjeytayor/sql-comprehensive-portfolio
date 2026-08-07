@@ -129,3 +129,10 @@ from invoice
 group by year
 having count(*) > 30
 order by year desc;
+
+select EXTRACT(month FROM invoice_date) AS month,
+count(*)
+from invoice
+group by month
+order by month desc;
+

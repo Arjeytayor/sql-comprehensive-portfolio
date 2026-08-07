@@ -31,6 +31,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 10 | Reusing CONCAT with a different separator | Chinook — City, country combined | Same function, different literal-text argument between values — confirms the pattern transfers, not just the one example |
 | 11 | TRIM for blank-vs-NULL, and why the combining operator must be OR not AND | Chinook — Tracks with NULL or blank composer | `''` vs. `NULL` are different kinds of "nothing"; why `TRIM(NULL)` never produces `''`, and why that makes `AND` silently fail |
 | 12 | EXTRACT for date parts, alias visibility across SELECT/GROUP BY/HAVING/ORDER BY | Chinook — Invoices per year, more than 30, busiest year first | Why a SELECT-list alias can't be referenced by another item in the *same* SELECT list, but can be used in `ORDER BY`; `COUNT(*)` for "how many rows," not `COUNT(alias)` |
+| 13 | Confirming EXTRACT transfers across date parts; distrust of a stale result panel | Chinook — Invoices per month, across all years, busiest month first | Same EXTRACT/GROUP BY/COUNT(*)/ORDER BY skeleton with `month` instead of `year`; re-running fresh instead of trusting a remembered/pasted result |
 
 ---
 
@@ -947,4 +948,42 @@ order by year desc;
 - **Guessed `EXTRACT` worked like character-slicing** (`LEFT`/`RIGHT`, counting characters) before confirming `invoice_date` was a structured date/timestamp value, not text — corrected by checking the actual column output shape first.
 - **Wrote `count(year)`**, referencing the `EXTRACT(...) AS year` alias from the same `SELECT` list — triggered "column year does not exist," since that alias isn't a real column and isn't visible yet to a sibling `SELECT` item. Fixed by switching to `COUNT(*)`.
 - **Wrote `having count > 30`** — omitted the parentheses that make `count` an actual function call. Caught by comparing it against the correctly-formed `count(*)` already used earlier in the same query.
+
+---
+
+## 13. Confirming EXTRACT Transfers Across Date Parts — Invoices Per Month, All Years Combined
+
+### The question
+Using Chinook, find how many invoices happened in each month, combining all 5 years together (so "January" means every January across every year, not broken out by year).
+
+### Why this one matters despite reusing the exact same skeleton
+This is a deliberate cold-transfer test: the entire query shape from Entry #12 (`EXTRACT` + `GROUP BY` + `COUNT(*)` + `ORDER BY`) was reapplied with only one change — `year` swapped for `month` — and it came out correct on the first attempt, no new syntax mistakes at all. The one real event worth logging wasn't a SQL error; it was **trusting a remembered/pasted result over re-running the query fresh**, which produced a false alarm.
+
+### The concept, reinforced
+
+**"Across all years" is a signal to *not* include year in the grouping at all.** The question could have been misread as "per month per year" (60 possible groups: Jan 2021, Jan 2022, ...), but "across all years" explicitly collapses that distinction — every January, regardless of year, belongs to one single "month 1" group. `GROUP BY month` alone (no `year` in the grouping) is what produces that collapse; the moment `year` gets added back into `GROUP BY`, the months start splitting apart by year again.
+
+**A working pattern from one date part transfers directly to another.** Nothing about `EXTRACT(month FROM invoice_date)` needed to be re-derived from scratch — it's the identical function, identical `FROM` syntax, identical surrounding `GROUP BY`/`COUNT(*)`/`ORDER BY` shell as the year version, just naming a different part.
+
+**Never trust a result you're recalling or re-pasting — always re-run fresh before trusting an unexpected pattern.** A first paste showed `ORDER BY month DESC` apparently returning ascending order (1 → 12), which looked like a genuine bug. Re-running the exact same query live showed it correctly descending (12 → 1) — the original paste was stale, not a real error. This is the same lesson from an earlier session's 59-row/8-row Gmail mixup: before concluding a query is broken, re-run it live and paste that exact fresh output, not a remembered or earlier-tab result.
+
+### Full solution
+
+```sql
+select EXTRACT(month FROM invoice_date) AS month,
+count(*)
+from invoice
+group by month
+order by month desc;
+```
+
+Returns 12 rows (month 12 down to month 1), each showing invoice counts in the low-to-mid 30s per month, summing to 412 total invoices across all 5 years — consistent with the ~80-83 invoices per year from Entry #12.
+
+### The pattern to remember
+
+**"Combine X across all Y" means Y does not appear in `GROUP BY` at all — only group by the dimension actually named in the question.** And separately: **when a result looks wrong in a way that contradicts working logic, re-run the query live before trusting the paste — a stale or cached result panel produces symptoms that look exactly like a real bug.**
+
+### Mistakes made this time
+
+None in the SQL itself — the `EXTRACT`/`GROUP BY`/`COUNT(*)`/`ORDER BY` pattern transferred cleanly from `year` to `month` with no correction needed. The only "mistake" was a false alarm from pasting a stale result instead of a fresh one, resolved by re-running live.
 
