@@ -32,6 +32,8 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 11 | TRIM for blank-vs-NULL, and why the combining operator must be OR not AND | Chinook — Tracks with NULL or blank composer | `''` vs. `NULL` are different kinds of "nothing"; why `TRIM(NULL)` never produces `''`, and why that makes `AND` silently fail |
 | 12 | EXTRACT for date parts, alias visibility across SELECT/GROUP BY/HAVING/ORDER BY | Chinook — Invoices per year, more than 30, busiest year first | Why a SELECT-list alias can't be referenced by another item in the *same* SELECT list, but can be used in `ORDER BY`; `COUNT(*)` for "how many rows," not `COUNT(alias)` |
 | 13 | Confirming EXTRACT transfers across date parts; distrust of a stale result panel | Chinook — Invoices per month, across all years, busiest month first | Same EXTRACT/GROUP BY/COUNT(*)/ORDER BY skeleton with `month` instead of `year`; re-running fresh instead of trusting a remembered/pasted result |
+| 14 | AGE for elapsed time, INTERVAL literals, casting syntax mix-ups | Chinook — Time since each invoice; invoices more than 4 years old | `AGE(column)` returns a structured `interval`, not a number; `timestamp column` is not valid cast syntax; comparing an `interval` needs an `INTERVAL` literal (or a string Postgres can infer as one) |
+| 15 | WHERE needs a boolean, not a computed value; `timestamp + interval` vs `interval + interval` | Chinook — Each invoice's date shifted 6 months forward | A date-shift belongs in `SELECT`, never `WHERE`; result type follows operand types — starting from the real date column gives a date back, starting from `AGE()`'s output only ever gives another interval |
 
 ---
 
@@ -986,4 +988,127 @@ Returns 12 rows (month 12 down to month 1), each showing invoice counts in the l
 ### Mistakes made this time
 
 None in the SQL itself — the `EXTRACT`/`GROUP BY`/`COUNT(*)`/`ORDER BY` pattern transferred cleanly from `year` to `month` with no correction needed. The only "mistake" was a false alarm from pasting a stale result instead of a fresh one, resolved by re-running live.
+
+---
+
+## 14. AGE for Elapsed Time, INTERVAL Literals, and Casting Syntax Mix-Ups — Time Since Each Invoice; Invoices Older Than 4 Years
+
+### The questions
+1. Using Chinook, for each invoice, find how much time has passed between its `invoice_date` and today.
+2. Using Chinook, find every invoice that happened more than 4 years ago — filtering with `AGE`, not a hardcoded date.
+
+### Why this one needs new techniques, on top of an old rule from a new angle
+Every earlier entry either filtered/grouped rows or substituted a display value — nothing so far needed to compute a *duration*. This pair of questions introduces two brand-new pieces (`AGE`, `INTERVAL`) and drags the `WHERE`-can't-see-`SELECT`-aliases rule (Entries #2, #3, #12) back out in yet another shape: this time inside a plain single-table query, no `JOIN`/`GROUP BY` involved at all — proof that rule isn't tied to aggregation queries specifically, it's tied to clause execution order, full stop.
+
+### Real-world version of this same problem
+Think of a filing cabinet of receipts, each stamped with a date. "How long ago was each receipt?" means holding today's date next to each stamp and reading off the gap — years, months, days — not just subtracting two numbers. Separately, "find every receipt from more than 4 years back" means picking a *length of time* (not a specific calendar date) as the cutoff and checking whether each receipt's gap is bigger than that length. Both are about a *span* of time, not a point in time — which is exactly what `AGE` and `INTERVAL` are built for.
+
+### The concepts, explained from zero
+
+**`AGE(column)` returns a structured `interval`, not a plain number.** `AGE(invoice_date)` computes the elapsed time between `invoice_date` and right now, but the result isn't a single number of days — it's an `interval` value broken into years/months/days (displayed here as `{"years":5,"months":7,"days":8}` by the query tool). That structure matters because it means the result can't be compared against a bare number like `4` — it needs another `interval` on the other side of any comparison.
+
+**Casting syntax: `timestamp 'literal'` works only with a quoted string, never a column name.** The first attempt, `AGE(timestamp invoice_date)`, tried to "cast" the column by sticking the word `timestamp` in front of it — but that specific syntax shape (`typename 'string'`) is Postgres's way of writing a *literal* value of that type, e.g. `timestamp '2023-01-01'`. It's not a general casting operator, and it doesn't accept a bare column name where the quoted string goes — that produces a syntax error. (The general-purpose casts, `CAST(expr AS type)` or `expr::type`, weren't even needed here once it turned out `invoice_date` was already `timestamp without time zone` — confirmed directly via `information_schema.columns` rather than assumed.)
+
+**Checking a column's actual type beats guessing.** Rather than guessing whether `invoice_date` needed a cast, running `SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'invoice';` gave a direct answer: already a `timestamp`. That made the whole cast attempt unnecessary — `AGE(invoice_date)` alone was correct.
+
+**`WHERE` can't see a `SELECT`-list alias — same rule, new context.** `WHERE date_days < ...` failed for the same structural reason `HAVING alias_name` fails in Entries #2/#3, and the same reason `COUNT(year)` failed in Entry #12: `WHERE` runs before `SELECT` builds `date_days`, so that name doesn't exist yet at the point `WHERE` evaluates. The fix is always the same regardless of *which* clause or *which* alias — repeat the full expression (`AGE(invoice_date)`), don't reference the shorthand name.
+
+**Double quotes vs. single quotes — the same trap as Entries #6 and #7, reoccurring.** `WHERE date_days < "years: 4"` used double quotes around what was meant to be a literal value. Double quotes are for identifiers in Postgres; single quotes are for literal text/values. `"years: 4"` would be read as a reference to a column/identifier literally named `years: 4`, not as data.
+
+**`INTERVAL 'n unit'` is how a literal time span gets written.** `INTERVAL '4 years'` means exactly that — a 4-year-long span, comparable against another `interval` like the output of `AGE()`. Other units work the same way: `INTERVAL '3 months'`, `INTERVAL '10 days'`.
+
+**Postgres can sometimes infer the cast without the `INTERVAL` keyword.** The final query used `AGE(invoice_date) > '4 years'` — no `INTERVAL` keyword at all — and it still worked, because Postgres saw the left side of `>` was already an `interval` and cast the right-side string to match. This is implicit type inference from context, not a general rule that quotes alone always work — writing `INTERVAL '4 years'` explicitly stays the clearer habit going forward.
+
+**Direction of the comparison must match "more than," not "less than."** "More than 4 years ago" means the elapsed time (`AGE`) is *greater than* 4 years — `>`, not `<`. An early attempt had this backwards (`date_days < ...`), diagnosed afterward as plain tunnel vision rather than a misunderstanding of what `AGE` measures.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Question 1 — "how long ago was each invoice?"** translates directly to `AGE(invoice_date)` — one function call, no `GROUP BY`, no `JOIN`, just a per-row calculation.
+2. **First attempt over-engineered a cast** (`AGE(timestamp invoice_date)`) before checking whether one was even needed — corrected by querying `information_schema.columns` and confirming `invoice_date` was already `timestamp without time zone`.
+3. **Dropped the cast entirely**, ran `SELECT AGE(invoice_date) AS date_days FROM invoice;` — worked, returning one `interval` per row.
+4. **Question 2 — "invoices more than 4 years old"** translates to reusing the same `AGE(invoice_date)` expression, this time inside a `WHERE` clause with a comparison against a 4-year span.
+5. **First attempt referenced the `SELECT`-list alias inside `WHERE`** (`WHERE date_days < ...`) — self-diagnosed correctly before even running it, by applying the same execution-order rule from Entries #2/#3/#12: `WHERE` can't see `SELECT` aliases.
+6. **Second attempt used double quotes and made-up interval text** (`WHERE date_days < "years: 4"`) — three separate issues at once (alias reuse, wrong quote type, invalid interval syntax), each individually diagnosed and fixed rather than patched all at once by guesswork.
+7. **Learned the `INTERVAL 'n unit'` literal syntax fresh** (hadn't been used anywhere in this project before), then assembled the final corrected query: repeat the full `AGE(invoice_date)` expression in `WHERE`, single-quote the literal, use `'4 years'` (implicitly cast to `interval`), and flip the operator to `>` for "more than."
+
+### Full solution
+
+```sql
+-- Question 1: time elapsed since each invoice
+select age(invoice_date) as date_days
+from invoice;
+
+-- Question 2: invoices more than 4 years old
+select age(invoice_date) as date_days
+from invoice
+where age(invoice_date) > '4 years';
+```
+
+### The pattern to remember
+
+**`AGE(column)` measures a span, and spans compare against other spans (`INTERVAL` literals), not bare numbers.** Any question shaped like "how long ago," "how old," or "more than N years/months/days since X" is an `AGE` + `INTERVAL`-comparison question — compute the `AGE` first, then compare it against a matching `INTERVAL` value, remembering to repeat the full `AGE(...)` expression in `WHERE` rather than reaching for its `SELECT`-list alias.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Check a column's actual data type before assuming it needs a cast** — `information_schema.columns` gives a direct answer in seconds; guessing wastes a whole failed attempt.
+- **`typename 'literal'` casting syntax (e.g. `timestamp '2023-01-01'`) only accepts a quoted string, never a bare column name** — that's not how you cast an existing column; use `CAST(col AS type)` or `col::type` if a real cast is ever needed.
+- **`AGE()`'s output is an `interval`, not a number — always compare it against another `interval`**, written as `INTERVAL 'n unit'` (or a quoted string Postgres can infer as one from context).
+- **The alias-visibility rule is not specific to `JOIN`/`GROUP BY` queries** — it's about clause execution order in general (`WHERE` always runs before `SELECT`), so it shows up even in the simplest single-table query.
+- **"More than N [time unit] ago" means `AGE(...) > INTERVAL 'N unit'`** — double-check the comparison direction against the actual English phrasing before running, since this is an easy one to reverse under tunnel vision.
+
+### Mistakes made this time (new ones, plus one repeat)
+
+- **Tried `AGE(timestamp invoice_date)`** — invalid cast syntax, and an unnecessary cast in the first place since the column was already a `timestamp`. Fixed by checking the real column type directly instead of assuming.
+- **Referenced the `SELECT`-list alias (`date_days`) inside `WHERE`** — the same alias-visibility mistake as Entries #2, #3, and #12, in a new (non-aggregating, single-table) context. Self-diagnosed correctly on sight this time, without needing it pointed out first.
+- **Used double quotes around a literal value** (`"years: 4"`) — the same quote-type mix-up as Entries #6 and #7, self-acknowledged as an ongoing weak spot ("the quotes thing is difficult — I keep forgetting").
+- **Wrote a made-up interval string** (`"years: 4"`) instead of the actual `INTERVAL 'n unit'` syntax — a genuinely new piece of syntax that hadn't been introduced yet, not a slip on something already known.
+- **Used `<` instead of `>`** for "more than 4 years ago" — self-diagnosed as tunnel vision rather than a conceptual gap about what `AGE` measures.
+
+---
+
+## 15. WHERE Needs a Boolean, Not a Computed Value; `timestamp + interval` vs. `interval + interval` — Each Invoice's Date Shifted 6 Months Forward
+
+### The question
+Using Chinook, for each invoice, calculate what date it would be exactly 6 months after `invoice_date`.
+
+### Why this one matters despite reusing familiar pieces
+This question deliberately reuses `INTERVAL` (just introduced in Entry #14) in a completely different role: not comparing against `AGE()`, but doing arithmetic directly on a date to produce a new date. Two wrong turns surfaced along the way, both genuinely new failure modes rather than repeats.
+
+### The concepts, explained from zero
+
+**`WHERE` always needs a true/false answer, never a value to compute or display.** The first attempt, `WHERE invoice_date + interval '6 months';`, tried to put a date-shift calculation — something meant to be *seen in the output* — inside `WHERE`, which only ever decides which rows survive. Postgres's own error said it plainly: *"argument of WHERE must be type boolean, not type timestamp without time zone."* Same underlying idea as Entry #6 (filtering vs. substituting): a calculation that produces a value to display belongs in `SELECT`, not `WHERE`.
+
+**`interval + interval` and `timestamp + interval` are not the same operation, even though both type-check.** The second attempt, `AGE(invoice_date) + INTERVAL '6 months'`, ran without any error — but `AGE(invoice_date)` is itself already an `interval` (an elapsed span), so adding `INTERVAL '6 months'` to it just produces a *bigger interval* (e.g., `5 years 7 months 8 days` becomes `6 years 1 month 8 days`). That's a valid calculation, just not the one the question asked for — it answers "what would this span be if it were 6 months longer," not "what calendar date is 6 months after the invoice." The fix: skip `AGE()` entirely and add the interval straight onto the real `timestamp` column, `invoice_date + INTERVAL '6 months'`, which returns an actual new date (`timestamp` type in, `timestamp` type out).
+
+**The result type always follows the operand types, not the goal in your head.** `timestamp + interval = timestamp` (a point in time, shifted). `interval + interval = interval` (still just a duration, now a different length). Knowing this in advance means checking "what type is this column already?" before adding an interval to it, rather than discovering the mismatch from the shape of the output afterward.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **First attempt put the whole calculation inside `WHERE`** — caught immediately by Postgres's own boolean-type error, which was specific enough to diagnose directly rather than needing a hint.
+2. **Recognized the fix was "move this into `SELECT`,"** echoing Entry #6's WHERE-vs-substitution distinction, but reached for `AGE(invoice_date) + INTERVAL '6 months'` — reusing the `AGE()` wrapper out of habit from the immediately preceding entry, without checking whether it was still needed.
+3. **That version ran and returned output**, but a check of the actual values (still shaped like `{"years":6,"months":1,"days":8}`, not a calendar date) revealed it hadn't answered the question — the same "a working query can still under-deliver on what was literally asked" lesson as Entry #8, here triggered by output *type* rather than output *content*.
+4. **Dropped `AGE()` entirely**, added the interval directly to `invoice_date`, and got back genuine calendar dates (`2021-07-01`, `2021-07-02`, ...) — one date per invoice, each exactly 6 months later.
+
+### Full solution
+
+```sql
+select invoice_date + interval '6 months' as date_days
+from invoice;
+```
+
+### The pattern to remember
+
+**A calculation meant to appear in the output goes in `SELECT`; a calculation meant to decide which rows survive goes in `WHERE` — and `WHERE` will refuse anything that isn't boolean, loudly and specifically.** Separately: **before adding an `INTERVAL` to something, check whether that something is already a `timestamp` (arithmetic gives a new date) or already an `interval` (arithmetic gives a bigger/smaller span) — the two look similar in a query but produce entirely different kinds of answers.**
+
+### Best practices / general approach — if you see this kind of question again
+
+- **"What date would it be N [unit] after/before X" is a `SELECT`-only date-arithmetic question** — `column + INTERVAL 'n unit'` or `column - INTERVAL 'n unit'`, no `AGE()` involved at all, since the goal is a new date, not an elapsed span.
+- **Reserve `AGE()` for "how long ago" / "how much time has passed" questions** — reach for it only when the question wants a *duration*, not a *date*.
+- **Postgres's boolean-type error on `WHERE` is a direct, trustworthy signal** — no need to guess; it names the exact type mismatch.
+- **After any query runs successfully, glance at the actual shape of the output before trusting it** — an interval-shaped result (`{"years":...}`) versus a date-shaped result (`2021-07-01 00:00:00`) is visible at a glance and immediately confirms (or disproves) whether the right operand types were used.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Put a date-shift calculation inside `WHERE`** — a new variant of the "filtering vs. substituting/computing" confusion from Entry #6, this time producing a hard type error rather than silently wrong row counts.
+- **Reused `AGE()` out of habit** from the immediately preceding question, producing `interval + interval` instead of `timestamp + interval` — caught by checking the output's shape against what the question literally asked for (a date, not a span), the same discipline as Entry #8.
 

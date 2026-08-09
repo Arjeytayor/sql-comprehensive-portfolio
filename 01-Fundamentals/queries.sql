@@ -136,3 +136,29 @@ from invoice
 group by month
 order by month desc;
 
+
+-- Time elapsed since each invoice
+select age(invoice_date) as date_days
+from invoice;
+
+-- Invoices from more than 4 years ago
+select age(invoice_date) as date_days
+from invoice
+where age(invoice_date) > '4 years';
+
+select age(timestamp invoice_date) as date_days from invoice
+
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'invoice';
+
+select age(invoice_date) as date_days from invoice
+
+
+select age(invoice_date) as date_days from invoice
+where age(invoice_date) > '4 years'
+
+select age(invoice_date) as date_days from invoice
+where age(invoice_date) > interval '4 years'
+
+select invoice_date + interval '6 months' as date_days from invoice;

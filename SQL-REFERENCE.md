@@ -22,6 +22,8 @@ New sections get added only after a concept has actually been practiced in a rea
 | 10 | Aggregate Function | `COUNT` |
 | 11 | Clause | `ORDER BY` |
 | 12 | Clause | `HAVING` |
+| 13 | Date Function | `AGE` |
+| 14 | Literal / Data Type | `INTERVAL` |
 
 ---
 
@@ -281,3 +283,52 @@ Keeps only year-groups with more than 30 invoices.
 - Never sees a `SELECT`-list alias — always needs the raw aggregate expression repeated (`HAVING COUNT(*) > 30`, not `HAVING year_count > 30`), because `HAVING` runs before `SELECT` creates that alias.
 - A bare aggregate name with no parentheses (`HAVING count > 30`) is not a valid function call — always needs `count(*)` or `count(column)`.
 - Can't be used without `GROUP BY` to filter on a per-row basis — that job belongs to `WHERE`.
+
+---
+
+## 13. `AGE(timestamp)` — Date Function
+
+**What it does:** Calculates the elapsed span between a timestamp/date value and right now (or between two explicit timestamps, if given two arguments), returning a structured `interval` value — years/months/days — not a single plain number.
+
+**Form used so far:**
+```sql
+select age(invoice_date) as date_days from invoice;
+```
+Returns one `interval` per invoice — e.g. `{"years":5,"months":7,"days":8}` — representing how long ago that invoice happened relative to today.
+
+**Other forms it supports (not yet used here):**
+- Two-argument form: `AGE(timestamp1, timestamp2)` — elapsed span between two explicit dates, instead of one date and "now."
+
+**What it can't do:**
+- Only accepts an actual `date`/`timestamp`-typed column — check with `information_schema.columns` first if unsure. If the column is already `timestamp`/`date` typed, no cast is needed at all.
+- Writing `AGE(timestamp invoice_date)` (the keyword `timestamp` directly in front of a column name) is **not** valid casting syntax — `timestamp '...'` only works in front of a quoted string literal, not a column reference.
+- Its output is a structured `interval`, not a plain number — can't be compared against a bare number (`AGE(invoice_date) > 4`); it needs another `interval` on the other side of the comparison (see `INTERVAL` below).
+
+---
+
+## 14. `INTERVAL 'n unit'` — Literal / Data Type
+
+**What it does:** Writes a literal span of time (e.g., "4 years," "10 days") that can be compared against, added to, or subtracted from date/timestamp/interval values.
+
+**Forms used so far:**
+```sql
+-- Comparison against AGE()
+select age(invoice_date) as date_days from invoice
+where age(invoice_date) > '4 years';
+
+-- Date arithmetic: shifting an actual date forward
+select invoice_date + interval '6 months' as date_days from invoice;
+```
+The first filters to only invoices whose elapsed `AGE` exceeds 4 years — this ran correctly even *without* writing the `INTERVAL` keyword explicitly, because Postgres inferred `'4 years'` should be cast to an `interval` from context (the other side of `>` was already an `interval`). Writing it explicitly as `INTERVAL '4 years'` is still the clearer, more deliberate habit.
+
+The second computes, for every invoice, the actual calendar date 6 months later — `timestamp + interval` returns a **new timestamp**, a genuinely different result type than `interval + interval` (see "What it can't do" below).
+
+**Other forms it supports (not yet used here):**
+- Other units: `INTERVAL '3 months'`, `INTERVAL '10 days'`, `INTERVAL '2 hours'`.
+- Subtracting instead of adding: `invoice_date - INTERVAL '1 year'`.
+
+**What it can't do:**
+- Needs a real recognized unit word inside the quotes — arbitrary text won't parse as a time span.
+- Same alias rule as every other `WHERE` condition: `AGE(invoice_date)` had to be written out in full inside `WHERE`, not referenced via its `date_days` `SELECT`-list alias — `WHERE` runs before `SELECT` creates that alias.
+- **`WHERE` always needs a boolean, never a computed value.** `WHERE invoice_date + interval '6 months'` errors with "argument of WHERE must be type boolean, not type timestamp without time zone" — a date-shift computation is something to *display* (`SELECT`), not a row-filter condition.
+- **`interval + interval` is not the same as `timestamp + interval`.** `AGE(invoice_date) + INTERVAL '6 months'` type-checks and runs without error, but it adds 6 months onto the *elapsed-time span*, producing a bigger interval — not a calendar date. Only starting from the actual `timestamp` column (`invoice_date + INTERVAL '6 months'`) produces a real date as the result. The operand types decide the result type: `timestamp + interval = timestamp`, `interval + interval = interval`.
