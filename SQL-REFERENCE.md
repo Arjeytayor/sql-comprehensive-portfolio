@@ -24,6 +24,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 12 | Clause | `HAVING` |
 | 13 | Date Function | `AGE` |
 | 14 | Literal / Data Type | `INTERVAL` |
+| 15 | Comparison Operator | `IN` |
 
 ---
 
@@ -233,9 +234,22 @@ group by year;
 ```
 Counts how many invoice rows fall into each year-group.
 
+**`COUNT(CASE WHEN condition THEN 1 END)` — conditional aggregation, now used:**
+```sql
+having count(case when skill in ('Python','Tableau','PostgreSQL') then 1 end) = 3
+```
+`COUNT(column)`'s ordinary "skip the `NULL`s" behavior, deliberately exploited: the `CASE` returns `1` for rows matching some condition and `NULL` otherwise, so `COUNT` ends up tallying only the matching rows per group — no new `COUNT` behavior, just a `NULL`-producing expression feeding it. See MASTER-GUIDE Entry #16.
+
+**`COUNT(DISTINCT ...)` — now used, safe version of the above when duplicate rows are possible:**
+```sql
+having count(distinct skill) = 3   -- after WHERE skill IN (...) has already filtered rows
+-- or, without pre-filtering:
+having count(distinct case when skill in (...) then skill end) = 3
+```
+Counts only *unique* non-`NULL` values — critical when a duplicate row could otherwise let a `CASE WHEN ... THEN 1` version over-count and pass a `HAVING` check it shouldn't (Entry #16's duplicate-`Python`-rows trace).
+
 **Other forms it supports (not yet used here):**
-- `COUNT(column)` — count of non-`NULL` values in a specific column (different from `COUNT(*)` whenever that column has `NULL`s).
-- `COUNT(DISTINCT column)` — count of unique non-`NULL` values only.
+- `COUNT(column)` on a genuine table column (not a `CASE` expression) — count of non-`NULL` values in that column.
 
 **What it can't do:**
 - `COUNT(alias)` doesn't work if `alias` isn't a real column — Postgres looks for an actual column by that name and errors if it's just something invented earlier in the same `SELECT` list (see MASTER-GUIDE Entry #12).
@@ -332,3 +346,27 @@ The second computes, for every invoice, the actual calendar date 6 months later 
 - Same alias rule as every other `WHERE` condition: `AGE(invoice_date)` had to be written out in full inside `WHERE`, not referenced via its `date_days` `SELECT`-list alias — `WHERE` runs before `SELECT` creates that alias.
 - **`WHERE` always needs a boolean, never a computed value.** `WHERE invoice_date + interval '6 months'` errors with "argument of WHERE must be type boolean, not type timestamp without time zone" — a date-shift computation is something to *display* (`SELECT`), not a row-filter condition.
 - **`interval + interval` is not the same as `timestamp + interval`.** `AGE(invoice_date) + INTERVAL '6 months'` type-checks and runs without error, but it adds 6 months onto the *elapsed-time span*, producing a bigger interval — not a calendar date. Only starting from the actual `timestamp` column (`invoice_date + INTERVAL '6 months'`) produces a real date as the result. The operand types decide the result type: `timestamp + interval = timestamp`, `interval + interval = interval`.
+
+---
+
+## 15. `column IN (val1, val2, ...)` — Comparison Operator
+
+**What it does:** Shorthand for a chain of `OR`-ed equality checks. `skill IN ('Python','Tableau','PostgreSQL')` means exactly `skill = 'Python' OR skill = 'Tableau' OR skill = 'PostgreSQL'`. Case-sensitive, same as `=`/`LIKE` (not `ILIKE`).
+
+**Form used so far:**
+```sql
+select candidate_id from candidates
+group by candidate_id
+having count(case when skill in ('Python','Tableau','PostgreSQL') then 1 end) = 3
+order by candidate_id asc;
+```
+Used inside a `CASE WHEN` (per-row true/false, itself feeding a `COUNT`) rather than as a standalone row filter — see MASTER-GUIDE Entry #16 for the full nested breakdown.
+
+**Other forms it supports (not yet used here):**
+- Standalone row filter: `WHERE skill IN (...)` — throws out non-matching rows before any grouping happens (different mechanism than the `CASE WHEN` form: rows disappear entirely instead of surviving with a `NULL`).
+- Subquery form: `WHERE column IN (SELECT ...)` — list comes from a query instead of a literal list (not yet covered).
+
+**What it can't do:**
+- Always needs a column/expression directly in front of it — `IN (...)` with nothing preceding it (e.g. bare inside a `CASE WHEN`) is a syntax error, not a silent no-op.
+- `NOT IN` (not yet used) is dangerous if the list or the tested column can contain `NULL` — it can silently return zero rows instead of erroring. Plain `IN` doesn't have this trap.
+- Doesn't dedupe or count anything by itself — it only answers true/false per row. Combining it with `COUNT`/`COUNT DISTINCT` for "has all of N required items" is a separate pattern layered on top (Entry #16).

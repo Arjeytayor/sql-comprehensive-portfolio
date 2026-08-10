@@ -34,6 +34,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 13 | Confirming EXTRACT transfers across date parts; distrust of a stale result panel | Chinook — Invoices per month, across all years, busiest month first | Same EXTRACT/GROUP BY/COUNT(*)/ORDER BY skeleton with `month` instead of `year`; re-running fresh instead of trusting a remembered/pasted result |
 | 14 | AGE for elapsed time, INTERVAL literals, casting syntax mix-ups | Chinook — Time since each invoice; invoices more than 4 years old | `AGE(column)` returns a structured `interval`, not a number; `timestamp column` is not valid cast syntax; comparing an `interval` needs an `INTERVAL` literal (or a string Postgres can infer as one) |
 | 15 | WHERE needs a boolean, not a computed value; `timestamp + interval` vs `interval + interval` | Chinook — Each invoice's date shifted 6 months forward | A date-shift belongs in `SELECT`, never `WHERE`; result type follows operand types — starting from the real date column gives a date back, starting from `AGE()`'s output only ever gives another interval |
+| 16 | Conditional aggregation — `CASE WHEN`/`IN` nested inside `COUNT`, `COUNT` vs `COUNT(DISTINCT ...)` | DataLemur — Candidates with all required skills | `IN` as OR-shorthand; reading a nested expression inside-out; why plain `COUNT` silently over-counts on duplicate rows and `COUNT(DISTINCT ...)` is the safe general version |
 
 ---
 
@@ -1111,4 +1112,74 @@ from invoice;
 
 - **Put a date-shift calculation inside `WHERE`** — a new variant of the "filtering vs. substituting/computing" confusion from Entry #6, this time producing a hard type error rather than silently wrong row counts.
 - **Reused `AGE()` out of habit** from the immediately preceding question, producing `interval + interval` instead of `timestamp + interval` — caught by checking the output's shape against what the question literally asked for (a date, not a span), the same discipline as Entry #8.
+
+---
+
+## 16. Conditional Aggregation — `CASE WHEN`/`IN` Nested Inside `COUNT` — Candidates With All Required Skills
+
+### The question
+Given a `candidates` table (`candidate_id`, `skill`, one row per candidate per skill they have), find every candidate who has **all three** of `Python`, `Tableau`, and `PostgreSQL`. Output just `candidate_id`, sorted ascending. (Assumption given in the problem: no duplicate rows in the table.)
+
+### Why this one matters
+Every individual piece — `GROUP BY`, `HAVING`, `COUNT`, `CASE WHEN`, `IN` — had already been used separately in earlier entries. What was actually new was **nesting them three layers deep inside one expression**: `IN` inside a `CASE WHEN`, that `CASE` inside a `COUNT`, that `COUNT` inside a `HAVING`. Read as a whole it looks intimidating; read inside-out, each layer is a function already known.
+
+### Real-world version of this same problem
+A hiring manager has a checklist of 3 must-have skills and a stack of resumes, one skill sticky-note per resume-skill. For each candidate's pile of sticky notes, they flip through and mark a tally mark only on notes that match something on the checklist, ignoring the rest — then only keep candidates whose tally hits exactly 3 (all three checklist items found, not just "some"). That's the whole query: tally-mark-if-it-matches, per row, then keep only the piles that hit the full checklist count.
+
+### The concept, explained from zero
+
+**`IN (list)` is shorthand for a chain of `OR`s.** `skill IN ('Python','Tableau','PostgreSQL')` means exactly `skill = 'Python' OR skill = 'Tableau' OR skill = 'PostgreSQL'`. Nothing more exotic than that — same case-sensitivity as `=`/`LIKE` (not `ILIKE`), works anywhere a boolean is expected (`WHERE`, `HAVING`, inside a `CASE WHEN`).
+
+**Reading a nested expression means working from the innermost layer outward:**
+1. Innermost: `skill IN (...)` — per row, true or false.
+2. Next: `CASE WHEN <that> THEN 1 END` — turns each row's true/false into a real value: `1` if true, `NULL` if false (no `ELSE` means "fall through to `NULL`," same rule as Entry #6).
+3. Next: `COUNT(...)` — tallies only the non-`NULL` results per group. This is nothing new about `COUNT` itself — `COUNT(column)` has always skipped `NULL`s (Entry #10's "`COUNT(*)` vs `COUNT(column)`" distinction); the `CASE` is just deliberately feeding it a column that's `NULL` exactly where you don't want a row counted.
+4. Outermost: `HAVING <that count> = 3` — keeps only groups where all 3 required skills were found.
+
+**`HAVING` (like `WHERE`) always needs something that evaluates to true/false — a comparison is the normal way to get that**, but not the only shape (`IN`, `EXISTS`, `BETWEEN` all work too, same as in `WHERE`).
+
+**Plain `COUNT(CASE WHEN ... THEN 1 END)` silently over-counts if a candidate has a duplicate skill row.** Traced by hand: candidate with rows `Python, Python, Tableau` (2 distinct skills, missing `PostgreSQL`) still produces `COUNT = 3` (three rows match the `IN` list, `CASE` returns `1, 1, 1`), wrongly passing `HAVING = 3` despite genuinely missing a required skill. The fix is `COUNT(DISTINCT ...)` — but `DISTINCT` needs something to distinguish *by*, so the `CASE` has to return the actual `skill` value (not a flat `1`) for `DISTINCT` to dedupe against: `COUNT(DISTINCT CASE WHEN skill IN (...) THEN skill END)`. This problem's stated assumption ("no duplicates in the table") is exactly what makes the simpler, non-`DISTINCT` version safe to submit here — it would not be safe in general.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **Recognized the shape**: "has all of a required set of things" → need to count, per candidate, how many of the required items showed up, and compare that count to the size of the required list.
+2. **First attempt wrote `CASE WHEN IN (...) THEN 1 END`** — missing the column being tested; `IN` needs something in front of it (`skill IN (...)`), not floating on its own.
+3. **Also wrote the wrong table/column names initially** (`customers`/`customer_id` instead of `candidates`/`candidate_id`) — caught by comparing against the problem statement's actual schema.
+4. **Fixed both, landed on the correct working query.**
+5. **Hand-traced a duplicate-skill scenario afterward** (not required by this problem, but worth knowing) to see *why* the "no duplicates" assumption matters, and confirmed `COUNT(DISTINCT CASE WHEN ... THEN skill END)` (or filtering with `WHERE` first, then `COUNT(DISTINCT skill)`) is the version that's safe even with duplicates.
+
+### Full solution
+
+```sql
+select candidate_id from candidates
+group by candidate_id
+having count(case when skill in ('Python','Tableau','PostgreSQL') then 1 end) = 3
+order by candidate_id asc;
+```
+
+General-purpose (safe with duplicates) version:
+```sql
+select candidate_id from candidates
+where skill in ('Python','Tableau','PostgreSQL')
+group by candidate_id
+having count(distinct skill) = 3
+order by candidate_id asc;
+```
+
+### The pattern to remember
+
+**"Does this group contain all of a required set of N items?" → count how many of those items are present per group (via `CASE WHEN ... IN (...)`, or by filtering first with `WHERE ... IN (...)`), then `HAVING COUNT(...) = N`.** Use `COUNT(DISTINCT ...)` whenever duplicate rows are possible — plain `COUNT` only stays safe under an explicit no-duplicates guarantee. Read any nested expression inside-out: innermost condition first, then what wraps it, then what wraps that.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **"Has all of X, Y, Z" (not just "has any of them")** is a signal for count-and-compare-to-N, not a plain filter — a plain `WHERE ... IN (...)` alone would return candidates missing some of the required skills too.
+- **`IN` always needs a column/expression directly in front of it** — `IN (...)` floating alone (inside a `CASE` or anywhere else) is a syntax error, not a warning.
+- **Default to `COUNT(DISTINCT ...)` for this pattern unless a no-duplicates guarantee is explicitly given** — cheap insurance against silent over-counting.
+- **When a nested expression looks intimidating, peel it from the inside out**: identify the innermost condition, then work outward one function at a time, rather than trying to read it left-to-right in one pass.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Wrote `CASE WHEN in (...) THEN 1 END`** — omitted the column (`skill`) that `IN` needed to test against.
+- **Used the wrong table/column names from memory** (`customers`/`customer_id`) before correcting to the problem's actual `candidates`/`candidate_id`.
+- **Initial working query didn't guard against duplicate skill rows** — correct under this problem's stated assumption, but not the general-purpose version; surfaced only after a deliberate hand-trace of a duplicate scenario.
 

@@ -162,3 +162,17 @@ select age(invoice_date) as date_days from invoice
 where age(invoice_date) > interval '4 years'
 
 select invoice_date + interval '6 months' as date_days from invoice;
+
+-- DataLemur (not Chinook) — candidates(candidate_id, skill) table, no duplicates assumed
+-- Find candidates who have all of Python, Tableau, and PostgreSQL
+select candidate_id from candidates
+group by candidate_id
+having count(case when skill in ('Python','Tableau','PostgreSQL') then 1 end) = 3
+order by candidate_id asc;
+
+-- General-purpose version, safe even if duplicate skill rows exist
+select candidate_id from candidates
+where skill in ('Python','Tableau','PostgreSQL')
+group by candidate_id
+having count(distinct skill) = 3
+order by candidate_id asc;
