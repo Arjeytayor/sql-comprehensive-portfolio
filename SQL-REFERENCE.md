@@ -25,6 +25,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 13 | Date Function | `AGE` |
 | 14 | Literal / Data Type | `INTERVAL` |
 | 15 | Comparison Operator | `IN` |
+| 16 | JOIN Type | `LEFT JOIN` |
 
 ---
 
@@ -370,3 +371,30 @@ Used inside a `CASE WHEN` (per-row true/false, itself feeding a `COUNT`) rather 
 - Always needs a column/expression directly in front of it — `IN (...)` with nothing preceding it (e.g. bare inside a `CASE WHEN`) is a syntax error, not a silent no-op.
 - `NOT IN` (not yet used) is dangerous if the list or the tested column can contain `NULL` — it can silently return zero rows instead of erroring. Plain `IN` doesn't have this trap.
 - Doesn't dedupe or count anything by itself — it only answers true/false per row. Combining it with `COUNT`/`COUNT DISTINCT` for "has all of N required items" is a separate pattern layered on top (Entry #16).
+
+---
+
+## 16. `LEFT JOIN` — JOIN Type
+
+**What it does:** Keeps every row from the table named right after `FROM` (the "left" table), regardless of whether a match exists in the joined table. Where no match exists, every column that would have come from the right-hand table is returned as `NULL` instead of the row being dropped. Contrast with `INNER JOIN` (used in every earlier entry), which drops a row entirely if either side has no match.
+
+**Form used so far:**
+```sql
+select pages.page_id
+from pages
+left join page_likes
+on pages.page_id = page_likes.page_id
+where page_likes.page_id is null
+order by pages.page_id asc;
+```
+Keeps every page, including ones with zero rows in `page_likes` (those rows come back with `page_likes.page_id`/`user_id`/`liked_date` all `NULL`), then `WHERE page_likes.page_id IS NULL` isolates just the unmatched ones — the "anti-join" pattern for "find rows in A with nothing matching in B." See MASTER-GUIDE Entry #17.
+
+**Other forms it supports (not yet used here):**
+- `RIGHT JOIN` — mirror image, keeps every row from the right-hand table instead.
+- `FULL OUTER JOIN` — keeps unmatched rows from *both* sides at once.
+- Can be used for its normal purpose too (just "attach optional related data, keep the anchor row either way"), not only for the anti-join `IS NULL` pattern.
+
+**What it can't do:**
+- Doesn't automatically isolate the unmatched rows — that always requires an explicit `WHERE <right_table>.<column> IS NULL` afterward. `LEFT JOIN` alone returns matched *and* unmatched rows mixed together.
+- The `IS NULL` check must target a column from the **joined (right-hand) table**, never the anchor (left) table's own key — the left table's key is never `NULL` by construction, so checking it silently filters nothing.
+- Same ambiguous-column risk as `INNER JOIN` once both tables share a column name (Entry #4) — every reference to that shared name needs table-prefixing.

@@ -176,3 +176,12 @@ where skill in ('Python','Tableau','PostgreSQL')
 group by candidate_id
 having count(distinct skill) = 3
 order by candidate_id asc;
+
+-- DataLemur (not Chinook) — pages(page_id, page_name), page_likes(user_id, page_id, liked_date)
+-- Find pages with zero likes (LEFT JOIN + IS NULL anti-join pattern)
+select pages.page_id
+from pages
+left join page_likes
+on pages.page_id = page_likes.page_id
+where page_likes.page_id is null
+order by pages.page_id asc;

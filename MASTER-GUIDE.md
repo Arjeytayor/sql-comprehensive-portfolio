@@ -35,6 +35,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 14 | AGE for elapsed time, INTERVAL literals, casting syntax mix-ups | Chinook — Time since each invoice; invoices more than 4 years old | `AGE(column)` returns a structured `interval`, not a number; `timestamp column` is not valid cast syntax; comparing an `interval` needs an `INTERVAL` literal (or a string Postgres can infer as one) |
 | 15 | WHERE needs a boolean, not a computed value; `timestamp + interval` vs `interval + interval` | Chinook — Each invoice's date shifted 6 months forward | A date-shift belongs in `SELECT`, never `WHERE`; result type follows operand types — starting from the real date column gives a date back, starting from `AGE()`'s output only ever gives another interval |
 | 16 | Conditional aggregation — `CASE WHEN`/`IN` nested inside `COUNT`, `COUNT` vs `COUNT(DISTINCT ...)` | DataLemur — Candidates with all required skills | `IN` as OR-shorthand; reading a nested expression inside-out; why plain `COUNT` silently over-counts on duplicate rows and `COUNT(DISTINCT ...)` is the safe general version |
+| 17 | `LEFT JOIN` + `IS NULL` anti-join pattern; why `INNER JOIN` can't find "no match" rows | DataLemur — Facebook pages with zero likes | `LEFT JOIN` keeps every left-table row even with no match, filling `NULL` on the right side; `INNER JOIN` drops unmatched rows before there's anything left to filter; ambiguous-column fix (Entry #4) reapplied post-JOIN |
 
 ---
 
@@ -1182,4 +1183,68 @@ order by candidate_id asc;
 - **Wrote `CASE WHEN in (...) THEN 1 END`** — omitted the column (`skill`) that `IN` needed to test against.
 - **Used the wrong table/column names from memory** (`customers`/`customer_id`) before correcting to the problem's actual `candidates`/`candidate_id`.
 - **Initial working query didn't guard against duplicate skill rows** — correct under this problem's stated assumption, but not the general-purpose version; surfaced only after a deliberate hand-trace of a duplicate scenario.
+
+---
+
+## 17. `LEFT JOIN` + `IS NULL` Anti-Join Pattern — Facebook Pages With Zero Likes
+
+### The question
+Given `pages(page_id, page_name)` and `page_likes(user_id, page_id, liked_date)`, find every page's `page_id` that has **zero** likes. Sort ascending.
+
+### Why this one matters
+Every prior `JOIN` question used `INNER JOIN`, which only ever returns rows that *do* match on both sides. This question needed the opposite: rows from `pages` that have **no** corresponding row in `page_likes` at all. `INNER JOIN` can't produce that — it was never taught, so this is a genuinely new tool, not a variation on a known one.
+
+### Real-world version of this same problem
+A full class roster, and a sign-up sheet listing who submitted a particular homework assignment. To find "everyone who *didn't* submit," handing someone just the sign-up sheet is useless — anyone who never signed up simply never appears on it. What's actually needed is the *entire roster*, with each name checked against the sign-up sheet, keeping only the names that came up empty on that check.
+
+### The concept, explained from zero
+
+**`INNER JOIN` only keeps a row if it finds a match on both sides — no match, no row, on either side.** This was already known, but the new insight is what that implies: a page with 0 likes has 0 matching rows in `page_likes`, so `INNER JOIN` throws it out *before* any `WHERE` clause ever runs. There is nothing left by the time you'd try to check for "zero" — the row simply isn't in the result to check.
+
+**`LEFT JOIN` keeps every row from the table named right after `FROM` (the "left" table), no matter what.** If a match exists, it attaches the matching row's data. If no match exists, the row still survives — but every column that would have come from the right-hand table comes back as `NULL`. So `pages LEFT JOIN page_likes` keeps all pages, including ones with zero likes; for those, `page_likes.user_id`, `page_likes.page_id`, and `page_likes.liked_date` are all `NULL`.
+
+**`LEFT JOIN` alone isn't the full answer — it keeps *everyone*, matched and unmatched together.** The extra step is filtering afterward with `WHERE <right_table>.<column> IS NULL`, which only ever comes out true for the unmatched rows (a genuinely missing right-side value), never for a matched row (which always has real data there). This is the two-part "anti-join" recipe: `LEFT JOIN` to keep everything + `WHERE right_table.column IS NULL` to isolate only what didn't match.
+
+**Which column to check `IS NULL` against matters.** `pages.page_id` is never `NULL` — it's the left/"always present" side of the join. `page_likes.page_id` is exactly the column that goes `NULL` when nothing matched. Checking the wrong side's column silently breaks the whole query (it would just never filter anything, since `pages.page_id` is always populated).
+
+**Ambiguous columns reappear post-`JOIN`, same as Entry #4.** Once `page_id` exists in both `pages` and `page_likes`, a bare `PAGE_ID` in `SELECT`/`GROUP BY`/`ORDER BY` is ambiguous and errors — needs table-prefixing (`pages.page_id`), same fix as before, just triggered by a new query shape.
+
+**No aggregation needed here.** This is a plain existence check ("does a match exist, yes/no"), not a count/sum/average — `GROUP BY` isn't required at all, even though it's tempting to reach for out of habit whenever a `JOIN` is involved.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **First draft used `INNER JOIN`** (the only join known at the time) plus `WHERE page_id IS NULL` placed after `GROUP BY` — both a clause-order syntax error and a table-name typo (`PAGE_LIKE` vs `PAGE_LIKES`).
+2. **Fixed the naming and clause order**, then reasoned explicitly that no aggregation was happening, so `GROUP BY` wasn't needed.
+3. **Walked through what `INNER JOIN` actually does to an unmatched page** (page `20701`, zero likes) and concluded correctly, unprompted, that it gets dropped entirely — meaning no later `WHERE` could ever catch it.
+4. **Learned `LEFT JOIN` from scratch** (new to Phase 2, pulled forward early), and identified correctly, on the first attempt, that `page_likes.page_id` (not `pages.page_id`) is the column that goes `NULL` on unmatched rows.
+5. **Re-added `GROUP BY` out of habit** on the next draft despite having already reasoned it wasn't needed — caught and dropped in the final cleanup pass, alongside fixing the ambiguous-column reference on both `SELECT` and `GROUP BY`.
+
+### Full solution
+
+```sql
+select pages.page_id
+from pages
+left join page_likes
+on pages.page_id = page_likes.page_id
+where page_likes.page_id is null
+order by pages.page_id asc;
+```
+
+### The pattern to remember
+
+**"Find rows in A with nothing matching in B" = `LEFT JOIN` (A first) + `WHERE B.column IS NULL`.** `INNER JOIN` can never do this job, because it deletes the exact rows you're trying to find before a `WHERE` clause gets a chance to look at them. Always check `IS NULL` against a column from the *right-hand* (joined) table, never the left table's own key — the left table's key is never `NULL` by construction.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **"Has none of," "zero," "never," "no matching X"** is the trigger phrase for this pattern — reach for `LEFT JOIN` + `IS NULL`, not `INNER JOIN`.
+- **Always check `IS NULL` on the joined (right-hand) table's column**, not the anchor table's — checking the wrong side silently returns nothing useful instead of erroring.
+- **Re-apply the ambiguous-column fix (Entry #4) every time a shared column name survives past a `JOIN`** — table-prefix it in `SELECT`, `WHERE`, `GROUP BY`, and `ORDER BY` alike.
+- **Don't reach for `GROUP BY` just because a `JOIN` is present** — only add it when something is actually being aggregated (counted, summed, averaged) per group; a plain existence check doesn't need it.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Used `INNER JOIN` where `LEFT JOIN` was required** — the core new lesson of this entry; not previously encountered since every earlier `JOIN` question only needed matched rows.
+- **Typo'd the table name** (`PAGE_LIKE` vs. `PAGE_LIKES`) between the `JOIN` line and the `ON` line.
+- **Placed `WHERE` after `GROUP BY`** — invalid clause order, caught by recalling the established `WHERE`-before-grouping rule from Entry #12.
+- **Re-added an unnecessary `GROUP BY`** on a later draft after already having correctly reasoned it wasn't needed — a "knowing vs. doing" lapse, not a comprehension gap.
 
