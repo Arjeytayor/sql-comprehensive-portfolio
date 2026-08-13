@@ -36,6 +36,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 15 | WHERE needs a boolean, not a computed value; `timestamp + interval` vs `interval + interval` | Chinook — Each invoice's date shifted 6 months forward | A date-shift belongs in `SELECT`, never `WHERE`; result type follows operand types — starting from the real date column gives a date back, starting from `AGE()`'s output only ever gives another interval |
 | 16 | Conditional aggregation — `CASE WHEN`/`IN` nested inside `COUNT`, `COUNT` vs `COUNT(DISTINCT ...)` | DataLemur — Candidates with all required skills | `IN` as OR-shorthand; reading a nested expression inside-out; why plain `COUNT` silently over-counts on duplicate rows and `COUNT(DISTINCT ...)` is the safe general version |
 | 17 | `LEFT JOIN` + `IS NULL` anti-join pattern; why `INNER JOIN` can't find "no match" rows | DataLemur — Facebook pages with zero likes | `LEFT JOIN` keeps every left-table row even with no match, filling `NULL` on the right side; `INNER JOIN` drops unmatched rows before there's anything left to filter; ambiguous-column fix (Entry #4) reapplied post-JOIN |
+| 18 | `WHERE` vs `GROUP BY` vs `CASE WHEN` as a filter; clause order; `ISNULL` as Postgres's one-word `IS NULL` | DataLemur — Unfinished parts | Filtering (keep/discard rows) is a `WHERE` job, not `GROUP BY` (collapses rows) or a standalone `CASE WHEN` (produces a value, not a boolean gate); correct clause order; `SELECT *` vs matching the asked-for columns; Postgres-only `ISNULL`/`NOTNULL` legacy syntax |
 
 ---
 
@@ -1247,4 +1248,72 @@ order by pages.page_id asc;
 - **Typo'd the table name** (`PAGE_LIKE` vs. `PAGE_LIKES`) between the `JOIN` line and the `ON` line.
 - **Placed `WHERE` after `GROUP BY`** — invalid clause order, caught by recalling the established `WHERE`-before-grouping rule from Entry #12.
 - **Re-added an unnecessary `GROUP BY`** on a later draft after already having correctly reasoned it wasn't needed — a "knowing vs. doing" lapse, not a comprehension gap.
+
+---
+
+## 18. `WHERE` vs `GROUP BY` vs `CASE WHEN`, Clause Order, and `ISNULL` — Unfinished Parts
+
+### The question
+Given `parts_assembly(part, finish_date, assembly_step)`, where a part can appear across multiple rows (one per assembly step it's been through), find every row for a part that's still unfinished — defined as **lacking a `finish_date`**. Return just `part` and `assembly_step`, one row per unfinished step (a part can legitimately appear more than once in the output).
+
+### Why this needs the technique it needs
+The instinct on seeing "find parts matching a condition" is often to reach for `GROUP BY` (because the table has repeated `part` values) or `CASE WHEN` (because there's a condition to check). Neither is right here. The expected output keeps **multiple rows per part** (`bumper` appears twice — once for step 3, once for step 4) — `GROUP BY part` would collapse those into a single row per part and destroy exactly the information the question wants. And `CASE WHEN` produces a *value* per row (used inside `SELECT`, or inside an aggregate like `COUNT`) — it isn't a row-filtering clause on its own; used bare after `GROUP BY` the way it first was, it's not even syntactically legal.
+
+### Real-world version of this same problem
+A shared laundry basket where each garment gets a sticky note logged every time it goes through a stage — wash, dry, fold. Some garments have a note for every stage; others are missing the "folded" note because they're still mid-process. To find every garment still not fully done, you don't merge all its notes into one summary card (that's what `GROUP BY` would do) — you walk the pile of individual notes and pull out just the ones missing the "folded" stamp, keeping each note as its own separate slip, since a garment might have several unfinished notes at once.
+
+### The concept, explained from zero
+
+**`WHERE` filters individual rows, one at a time, before anything else happens to them.** It doesn't summarize, doesn't merge, doesn't reduce row count except by dropping rows that fail the condition. Exactly one output row per input row that passes.
+
+**`GROUP BY` is a *reduction* tool — it deliberately merges multiple rows into one per group.** It exists for when you want fewer rows out than you had in (one row per distinct group value), almost always paired with an aggregate (`COUNT`, `SUM`, `AVG`...). If the question's expected output has *more* rows for a given key than one, `GROUP BY` on that key is the wrong tool — grouping is happening where none was asked for.
+
+**`CASE WHEN` is an expression, not a clause.** It always sits somewhere a *value* is expected — inside `SELECT` (to label or transform a column), inside an aggregate like `COUNT(CASE WHEN ... THEN 1 END)` (Entry #16), or as part of a larger boolean expression. It is never a standalone thing you put after `GROUP BY` on its own line expecting it to filter rows — there's no clause called `CASE WHEN` in SQL's grammar; only `WHERE` and `HAVING` filter rows.
+
+**SQL clause order is fixed:** `SELECT ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY`. This isn't stylistic — the database evaluates roughly in this order too (find the rows, filter them, optionally group what's left, optionally filter groups, then sort), so writing `GROUP BY` before `WHERE` is both a syntax error and backwards from how the logic actually needs to happen.
+
+**`IS NULL` tests whether a value is missing** — "lacks a `finish_date`" translates directly to `finish_date IS NULL`.
+
+**`SELECT *` returns every column in the table, whether or not the question asked for it.** The expected output here only shows `part` and `assembly_step` — `finish_date` isn't wanted in the result even though it's the column being filtered on. Filtering *on* a column and *displaying* that column are separate decisions.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **First attempt:** `SELECT * FROM parts_assembly GROUP BY part CASE WHEN finish_date is null;` — `GROUP BY` reached for out of habit (the table has repeated `part` values), and `CASE WHEN` used as if it were a filter clause, with no `WHERE` anywhere.
+2. **Second attempt:** moved to `WHERE`, but kept `GROUP BY part` positioned *before* `WHERE` — wrong clause order — and hadn't yet reconsidered whether `GROUP BY` belonged in the query at all.
+3. **Recognized, by comparing against the expected output's two `bumper` rows, that grouping by `part` would collapse exactly the rows needed** — dropped `GROUP BY` entirely, fixed the clause order.
+4. **Ran with `SELECT *`,** got the right *rows* but too many *columns* (`finish_date` showing up alongside `part`/`assembly_step`).
+5. **Narrowed `SELECT *` down to `SELECT part, assembly_step`,** matching the expected output exactly.
+6. **Final submitted form used `ISNULL` (one word, no space) instead of `IS NULL`** — confirmed correct on DataLemur.
+
+### A hand-trace through the sample data
+Sample rows: `bumper` has step 1 (finished), step 2 (finished), step 3 (no `finish_date`), step 4 (no `finish_date`). `battery` has steps 1–3, all finished.
+
+- `WHERE finish_date IS NULL` (or `ISNULL`) checks each row **individually**: `bumper`/step 3 → `finish_date` missing → keep. `bumper`/step 4 → missing → keep. `bumper`/step 1 and 2 → present → discard. `battery`'s three rows → all present → discard.
+- Result: two surviving rows, `bumper`/3 and `bumper`/4 — exactly the expected output, because nothing ever merged them into one.
+
+### Full solution
+
+```sql
+SELECT part, assembly_step
+FROM parts_assembly
+WHERE finish_date ISNULL
+```
+
+### The pattern to remember
+
+**"Find rows matching a per-row condition, keeping the same row shape" is a `WHERE` job — not `GROUP BY` (which merges rows) and not a bare `CASE WHEN` (which produces a value, not a filter).** Before reaching for `GROUP BY`, check whether the expected output actually has *fewer* rows per key than the input — if it has the *same or more*, grouping is the wrong move. Clause order is always `SELECT → FROM → WHERE → GROUP BY → HAVING → ORDER BY`, matching the order operations logically have to happen in.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Compare row *counts* in the expected output against the input before choosing `GROUP BY`** — repeated key values in the source table don't automatically mean the answer wants them merged.
+- **`CASE WHEN` always needs a home** — inside `SELECT`, inside an aggregate, or inside a larger expression. It's never a clause by itself.
+- **Match `SELECT`'s column list to what the expected output actually shows**, not to every column touched by `WHERE` — filtering on a column doesn't obligate displaying it (echoes Entry #8).
+- **`finish_date ISNULL` (one word) is valid Postgres — a historical alias for `IS NULL`** (same for `NOTNULL` / `IS NOT NULL`) — but it's non-standard SQL, specific to Postgres, and **dangerously similarly-named to a totally different function in other engines**: MySQL and SQL Server both have an `ISNULL(expr, replacement)` *function* that behaves like `COALESCE`, not a null test. Prefer writing `IS NULL` (two words) for anything meant to be portable or read unambiguously by someone coming from another engine.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Used `GROUP BY` where no grouping was wanted** — reached for out of habit because the table had repeated `part` values, not because the question asked for a merged summary.
+- **Used bare `CASE WHEN` as if it were a row-filter clause** — it's an expression, not a clause; there's no such thing as a standalone `CASE WHEN` filter in SQL's grammar.
+- **Placed `GROUP BY` before `WHERE`** — invalid clause order (same category of mistake as Entry #17's `WHERE`-after-`GROUP BY`, opposite direction).
+- **Left `SELECT *` in place after fixing the row-filtering logic** — got the right rows before getting the right columns; two separate fixes, not one.
 

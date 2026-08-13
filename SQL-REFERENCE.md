@@ -157,6 +157,14 @@ This is a genuine, correct filter — it belongs on questions that ask "which ro
 - Only ever compares against `NULL`, `TRUE`, `FALSE`, or `UNKNOWN` — never a text value or number. `WHERE email IS 'gmail.com'` is invalid; that job belongs to `=` (exact match) or `LIKE`/`ILIKE` (pattern match).
 - Doesn't substitute a value — it only decides whether a row survives. If the goal is "show every row, but display something else when this one is missing," use `COALESCE`/`CASE WHEN` instead.
 
+**`ISNULL` / `NOTNULL` — one-word Postgres-only alias, now used:**
+```sql
+where finish_date ISNULL   -- exactly equivalent to: where finish_date IS NULL
+```
+Postgres documents `expr ISNULL` and `expr NOTNULL` as historical one-word equivalents of `expr IS NULL` / `expr IS NOT NULL`. Confirmed working (MASTER-GUIDE Entry #18) — same behavior as the two-word form, just non-standard SQL specific to Postgres.
+
+**Cross-engine trap: don't confuse this with `ISNULL()` in other databases.** MySQL and SQL Server both have an `ISNULL(expr, replacement)` — a *two-argument function* that behaves like `COALESCE`, returning `replacement` when `expr` is `NULL`. Same spelling, completely different job (substitution vs. a boolean null-test), and not portable — code written with Postgres's one-word `ISNULL` operator will not mean the same thing, or may not even parse, on those other engines. Prefer `IS NULL` (two words) when portability or unambiguous reading matters.
+
 ---
 
 ## 7. Wildcard Placement Reference — `%` and `_`

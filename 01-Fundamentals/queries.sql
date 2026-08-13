@@ -185,3 +185,9 @@ left join page_likes
 on pages.page_id = page_likes.page_id
 where page_likes.page_id is null
 order by pages.page_id asc;
+
+-- DataLemur (not Chinook) — parts_assembly(part, finish_date, assembly_step)
+-- Find unfinished parts (no finish_date) — WHERE not GROUP BY, ISNULL as Postgres's one-word IS NULL
+SELECT part, assembly_step
+FROM parts_assembly
+WHERE finish_date ISNULL
