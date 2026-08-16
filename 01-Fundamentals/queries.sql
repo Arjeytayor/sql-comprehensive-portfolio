@@ -200,3 +200,13 @@ FROM posts
 WHERE EXTRACT(YEAR FROM post_date) = 2021
 GROUP BY user_id
 HAVING COUNT(*) >= 2;
+
+-- DataLemur (not Chinook) — messages(message_id, sender_id, receiver_id, content, sent_date)
+-- Top 2 senders by message count in August 2022 — ORDER BY + LIMIT for "top N", compound EXTRACT filter with AND
+SELECT sender_id, COUNT(message_id) AS message_count
+FROM messages
+WHERE EXTRACT(year FROM sent_date) = 2022
+  AND EXTRACT(month FROM sent_date) = 8
+GROUP BY sender_id
+ORDER BY message_count DESC
+LIMIT 2;

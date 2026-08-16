@@ -28,6 +28,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 16 | JOIN Type | `LEFT JOIN` |
 | 17 | Aggregate Function | `MIN` / `MAX` |
 | 18 | Operator | `::` (cast) |
+| 19 | Clause | `LIMIT` |
 
 ---
 
@@ -226,8 +227,16 @@ Returns just the year (e.g. `2023`) for every invoice, discarding month/day/time
 - Other parts: `EXTRACT(month FROM column)`, `EXTRACT(day FROM column)`, `EXTRACT(hour FROM column)`, `EXTRACT(dow FROM column)` (day of week), etc.
 - Can be used in `WHERE`/`HAVING` too, not just `SELECT`.
 
+**Compound date filters — now used, one `EXTRACT` call per part, joined with `AND`:**
+```sql
+where EXTRACT(year from sent_date) = 2022
+  and EXTRACT(month from sent_date) = 8
+```
+`EXTRACT(part FROM column)` only ever takes **one** part name — `EXTRACT(year, month FROM column)` is not valid syntax. Pinning down a specific month-of-a-specific-year needs two separate `EXTRACT(...) = value` conditions, both required to hold, hence `AND` rather than a single call. See MASTER-GUIDE Entry #20.
+
 **What it can't do:**
 - Only works on an actual date/timestamp-typed column — not on a plain text or integer column pretending to hold a date.
+- Only ever extracts **one** named part per call — no comma-separated list of parts in a single `EXTRACT(...)`.
 - The extracted result is invisible to other items in the *same* `SELECT` list if aliased — see the `AS year` / `COUNT(year)` trap logged in MASTER-GUIDE Entry #12. Only `GROUP BY`/`ORDER BY` can reference that alias, not a sibling `SELECT` expression.
 
 ---
@@ -454,3 +463,26 @@ group by user_id;
 **What it can't do:**
 - `::date` on a value that's already just a `date` is a harmless no-op, but casting the wrong direction (e.g. trying to squeeze a `timestamp`'s time-of-day back out of an already-cast `date`) isn't possible — the time is gone, not hidden.
 - Casting doesn't fix a type mismatch that's conceptually wrong (e.g. `'abc'::integer` still errors) — it only works between types that have a sensible conversion.
+
+---
+
+## 19. `LIMIT n` — Clause
+
+**What it does:** Caps the number of rows the query returns to at most `n`, applied to whatever order the result set is already in. It doesn't test any column's value and isn't a substitute for `WHERE`/`HAVING` — it's purely positional ("stop after this many rows"), which makes it the tool for "top N" questions.
+
+**Form used so far:**
+```sql
+select sender_id, count(message_id) as message_count
+from messages
+where extract(year from sent_date) = 2022
+  and extract(month from sent_date) = 8
+group by sender_id
+order by message_count desc
+limit 2;
+```
+`ORDER BY message_count DESC` defines what "top" means (highest count first); `LIMIT 2` then cuts the list off after the first 2 rows of that ordering. See MASTER-GUIDE Entry #20.
+
+**What it can't do:**
+- **Means nothing reliable without `ORDER BY` first.** `LIMIT` without a preceding `ORDER BY` returns *some* 2 rows, but which 2 is unspecified/arbitrary — it doesn't know "top" means "highest" unless `ORDER BY` already established the sort direction.
+- Isn't a filtering condition — can't express "rows where count > 5" or any value-based test; that's still `WHERE`/`HAVING`'s job. `LIMIT` only ever answers "how many rows," never "which rows qualify."
+- Goes at the very end of the clause sequence — after `ORDER BY`, last of all: `SELECT ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY ... LIMIT`.

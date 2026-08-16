@@ -38,6 +38,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 17 | `LEFT JOIN` + `IS NULL` anti-join pattern; why `INNER JOIN` can't find "no match" rows | DataLemur — Facebook pages with zero likes | `LEFT JOIN` keeps every left-table row even with no match, filling `NULL` on the right side; `INNER JOIN` drops unmatched rows before there's anything left to filter; ambiguous-column fix (Entry #4) reapplied post-JOIN |
 | 18 | `WHERE` vs `GROUP BY` vs `CASE WHEN` as a filter; clause order; `ISNULL` as Postgres's one-word `IS NULL` | DataLemur — Unfinished parts | Filtering (keep/discard rows) is a `WHERE` job, not `GROUP BY` (collapses rows) or a standalone `CASE WHEN` (produces a value, not a boolean gate); correct clause order; `SELECT *` vs matching the asked-for columns; Postgres-only `ISNULL`/`NOTNULL` legacy syntax |
 | 19 | `MIN`/`MAX` per group, `AGE` vs `date - date`, why `CASE WHEN` can't substitute for a cross-row comparison | DataLemur — Facebook posts, days between first and last post of 2021 | `MIN`/`MAX` compare across a whole group, `CASE WHEN` only ever looks at one row; `EXTRACT(...) = year` for a row-level year filter in `WHERE`; `AGE()`'s calendar-broken-down interval vs. `::date` cast + subtraction for a flat integer day count; `WHERE` can't see `SELECT`-list aliases (reapplied from Entry #13) |
+| 20 | `ORDER BY` + `LIMIT` for "top N"; compound `EXTRACT` filters joined with `AND`; third repeat of `WHERE`-before-`GROUP BY` (self-caught) | DataLemur — Microsoft Teams power users, top 2 senders in August 2022 | "Top N" is a sort-then-cut operation (`ORDER BY` + `LIMIT`), never a `WHERE`/`HAVING` threshold guess; `EXTRACT` takes exactly one part per call, so "this month of this year" needs two `EXTRACT(...) = value` conditions `AND`ed together, not one call with two parts |
 
 ---
 
@@ -1400,4 +1401,70 @@ HAVING COUNT(*) >= 2;
 - **Referenced a `SELECT`-list alias inside `WHERE`** (`where post_year is 2021`) — repeat of the Entry #13 `AGE`/`date_days` alias-timing trap, this time with a different function.
 - **Dropped the "2+ posts" `HAVING` condition partway through**, twice, while focused on fixing something else in the query — lost track of a previously-added requirement mid-edit.
 - **Assumed adding `::date` casts fixed the output shape without checking what `AGE()` still printed** — the casts were necessary but not sufficient; `AGE()` itself needed to be removed, not just fed differently-typed inputs.
+
+## 20. `ORDER BY` + `LIMIT` for "Top N," Compound `EXTRACT` Filters with `AND` — Microsoft Teams Power Users
+
+### The question
+Given `messages(message_id, sender_id, receiver_id, content, sent_date)`, find the **top 2** users who sent the most messages in **August 2022**. Output `sender_id` and `message_count`, ordered by count descending.
+
+### Why this needs the technique it needs
+"Top 2" isn't a condition any single row or group can pass or fail on its own — it's a statement about *rank after sorting the whole result set*. There's no column to test with `WHERE` or `HAVING` that means "is this in the top 2" without first knowing everyone else's count too. That's what `ORDER BY` + `LIMIT` are for: sort by the value that defines "top," then cut the list off at the count wanted. Separately, "August 2022" is two calendar facts at once (the right year, *and* the right month) — `EXTRACT` only ever answers one such fact per call, so nailing down both requires two conditions joined with `AND`, not one call asking for both at once.
+
+### Real-world version of this same problem
+A sales-leaderboard app that has to announce "this month's top 2 reps." Nobody sets a sales-dollar cutoff and hopes exactly two people clear it — that would either crown zero people (bar set too high) or five (set too low). The only reliable way is to rank everyone by their total first, then read off the first two names from that ranked list. Same logic for "this specific month" — checking only the month number would also match every other year's August; checking only the year would match all twelve months of 2022. Both facts have to hold together.
+
+### The concept, explained from zero
+
+**`ORDER BY` defines what "top" or "bottom" even means** — without it, a result set has no inherent rank; rows just come back in whatever order the database happens to produce them.
+
+**`LIMIT n` caps the row count to `n`, applied to whatever order already exists.** It doesn't inspect any column's value and can't express a condition like "count > 5" — it only answers "how many rows," never "which ones qualify." Used *after* `ORDER BY` has already put the highest counts first, `LIMIT 2` becomes "give me the top 2." Used without an `ORDER BY` in front of it, `LIMIT` returns some arbitrary 2 rows — not necessarily the highest anything.
+
+**`EXTRACT(part FROM column)` takes exactly one part name per call** — never a comma-separated list like `EXTRACT(year, month FROM column)`. To test two calendar facts about the same column, write two separate `EXTRACT(...) = value` conditions and combine them with `AND` — both must hold simultaneously, the same combinator logic as Entry #11's `OR`/`AND` lesson, just aimed at two sub-parts of one column instead of two different columns.
+
+**Clause order, once more:** `WHERE` still has to sit before `GROUP BY` — third time this exact ordering has come up (Entries #17, #18), worth treating as a known trouble spot to double-check deliberately rather than trusting habit.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **First draft:** `SELECT sender_id, COUNT(message_id) AS message_count FROM messages GROUP BY sender_id ORDER BY message_count DESC;` — solid grouped-count-and-sort skeleton, but no August 2022 filter at all and no `LIMIT`, so it returned every sender ever, unfiltered by date.
+2. **Added `LIMIT 2`** correctly on the first try, no trouble — clean use of the "sort then cut" idea once prompted to think about what caps the row count.
+3. **Added a date filter, but three things wrong at once:** placed `WHERE` *after* `GROUP BY` (repeat of the Entries #17/#18 clause-order mistake), wrote `EXTRACT(year, month FROM sent_date)` as a single call with two comma-separated parts (not valid — `EXTRACT` only takes one), and compared the result to `08/2022` as a bare literal (evaluates as division — `08 / 2022` — not a date test at all).
+4. **Self-diagnosed the clause-order slip out loud** ("I keep forgetting the order for the queries") before being told, and self-corrected all three problems in one pass: moved `WHERE` before `GROUP BY`, split the single `EXTRACT` call into two separate `EXTRACT(year ...) = 2022` and `EXTRACT(month ...) = 8` conditions, and joined them with `AND`. Query ran clean and matched the expected output shape.
+
+### A hand-trace through the sample data
+Sample rows: sender `3601` → 08/03 (to 4500), 06/14 (to 8752), 08/10 (to 4500); sender `4500` → 08/03 (to 3601).
+
+- `WHERE EXTRACT(year FROM sent_date) = 2022 AND EXTRACT(month FROM sent_date) = 8` keeps the two 08/03 rows and the 08/10 row, drops the 06/14 row (year matches, month doesn't) before any grouping happens.
+- `GROUP BY sender_id` buckets what's left: `3601` → 2 surviving rows, `4500` → 1 surviving row.
+- `ORDER BY message_count DESC` puts `3601` first (2), `4500` second (1).
+- `LIMIT 2` keeps both here since the sample only has two senders total — with more senders in the real dataset, anyone past rank 2 would be cut.
+- Matches the example output: `3601 → 2`, `4500 → 1`.
+
+### Full solution
+
+```sql
+SELECT sender_id, COUNT(message_id) AS message_count
+FROM messages
+WHERE EXTRACT(year FROM sent_date) = 2022
+  AND EXTRACT(month FROM sent_date) = 8
+GROUP BY sender_id
+ORDER BY message_count DESC
+LIMIT 2;
+```
+
+### The pattern to remember
+
+**"Top N" = `ORDER BY` (defines what "top" means) + `LIMIT N` (cuts the list there) — never a `WHERE`/`HAVING` threshold guess.** A compound date condition ("this specific month of this specific year") = one `EXTRACT` call per calendar unit, `AND`ed together, since `EXTRACT` only ever returns one part per call.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Whenever a question says "top N" (or "bottom N," "the N highest/lowest"), reach for `ORDER BY` + `LIMIT` immediately** — don't try to guess a numeric threshold that happens to produce exactly N rows.
+- **Any date filter needing more than one calendar unit pinned down at once (month + year, day + month, etc.) needs one `EXTRACT` per unit, `AND`ed together** — never a single `EXTRACT` call with multiple parts.
+- **Clause order checklist, now including `LIMIT`:** `SELECT → FROM → WHERE → GROUP BY → HAVING → ORDER BY → LIMIT`. `WHERE`-before-`GROUP BY` specifically has now slipped three times (Entries #17, #18, #20) — worth a deliberate pause to check this specific ordering every time a query has both clauses, rather than trusting habit.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Omitted the August 2022 filter entirely on the first draft** — the grouped-count-and-sort logic was right, but nothing yet restricted which rows counted.
+- **Repeated the `WHERE`-after-`GROUP BY` clause-order mistake for the third time** (Entries #17, #18, now this one) — self-caught this time, unprompted, mid-fix, rather than needing it pointed out.
+- **Combined two `EXTRACT` parts into one call** (`EXTRACT(year, month FROM sent_date)`) — not valid syntax; `EXTRACT` only ever takes one named part.
+- **Wrote `08/2022` as a bare literal** — evaluates as division (`08 / 2022`), not a date comparison of any kind.
 
