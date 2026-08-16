@@ -43,7 +43,7 @@
 **KPIs**
 - [x] ≥20 fundamentals queries saved in `01-Fundamentals/queries.sql` (or one file per topic) — 22 queries saved as of 2026-08-05
 - [x] Can explain, in your own words, why `HAVING` exists when `WHERE` already filters — demonstrated across MASTER-GUIDE Entries #2–#3
-- [ ] ≥10 DataLemur easy questions solved (profile shows it publicly) — 3/10 as of 2026-08-13
+- [ ] ≥10 DataLemur easy questions solved (profile shows it publicly) — 4/10 as of 2026-08-16
 - [x] First GitHub commit pushed (plain `git commit -m "..."`, no co-author trailer)
 
 ---

@@ -191,3 +191,12 @@ order by pages.page_id asc;
 SELECT part, assembly_step
 FROM parts_assembly
 WHERE finish_date ISNULL
+
+-- DataLemur (not Chinook) — posts(user_id, post_id, post_content, post_date)
+-- Days between each user's first and last 2021 post, users with 2+ posts only
+-- MIN/MAX per group (not CASE WHEN — cross-row comparison, not per-row); ::date cast + subtraction for a flat integer, not AGE()
+SELECT user_id, MAX(post_date::date) - MIN(post_date::date) AS days_between
+FROM posts
+WHERE EXTRACT(YEAR FROM post_date) = 2021
+GROUP BY user_id
+HAVING COUNT(*) >= 2;

@@ -26,6 +26,8 @@ New sections get added only after a concept has actually been practiced in a rea
 | 14 | Literal / Data Type | `INTERVAL` |
 | 15 | Comparison Operator | `IN` |
 | 16 | JOIN Type | `LEFT JOIN` |
+| 17 | Aggregate Function | `MIN` / `MAX` |
+| 18 | Operator | `::` (cast) |
 
 ---
 
@@ -326,6 +328,7 @@ Returns one `interval` per invoice — e.g. `{"years":5,"months":7,"days":8}` �
 - Only accepts an actual `date`/`timestamp`-typed column — check with `information_schema.columns` first if unsure. If the column is already `timestamp`/`date` typed, no cast is needed at all.
 - Writing `AGE(timestamp invoice_date)` (the keyword `timestamp` directly in front of a column name) is **not** valid casting syntax — `timestamp '...'` only works in front of a quoted string literal, not a column reference.
 - Its output is a structured `interval`, not a plain number — can't be compared against a bare number (`AGE(invoice_date) > 4`); it needs another `interval` on the other side of the comparison (see `INTERVAL` below).
+- **`AGE` is the wrong tool when the question wants a single plain integer "number of days."** Its output is always calendar-broken-down (years/months/days), which only *looks* like a clean day count when the gap happens to stay inside one month. For a true flat day count, use `date - date` subtraction instead — see §18. (MASTER-GUIDE Entry #19.)
 
 ---
 
@@ -406,3 +409,48 @@ Keeps every page, including ones with zero rows in `page_likes` (those rows come
 - Doesn't automatically isolate the unmatched rows — that always requires an explicit `WHERE <right_table>.<column> IS NULL` afterward. `LEFT JOIN` alone returns matched *and* unmatched rows mixed together.
 - The `IS NULL` check must target a column from the **joined (right-hand) table**, never the anchor (left) table's own key — the left table's key is never `NULL` by construction, so checking it silently filters nothing.
 - Same ambiguous-column risk as `INNER JOIN` once both tables share a column name (Entry #4) — every reference to that shared name needs table-prefixing.
+
+---
+
+## 17. `MIN(column)` / `MAX(column)` — Aggregate Function
+
+**What it does:** Scans every value in a group and returns the smallest (`MIN`) or largest (`MAX`) one. Works on numbers, text (alphabetical order), and dates/timestamps (chronological order) alike. Unlike `CASE WHEN`, which decides something about one row at a time, `MIN`/`MAX` compare *across* every row in the group to pick out a single extreme value — there's no way to answer "which is earliest" by looking at just one row in isolation.
+
+**Form used so far:**
+```sql
+select user_id, max(post_date::date) - min(post_date::date) as days_between
+from posts
+where extract(year from post_date) = 2021
+group by user_id
+having count(*) >= 2;
+```
+Per `user_id` group, `MIN(post_date)` pulls out that user's earliest 2021 post and `MAX(post_date)` their latest — the two values then feed into a subtraction (§18) to get the day gap. See MASTER-GUIDE Entry #19.
+
+**What it can't do:**
+- Like any aggregate, a bare column reference can't sit next to it in the same `SELECT` list under a `GROUP BY` unless that column is either the `GROUP BY` key itself or wrapped in another aggregate — `SELECT user_id, post_date, MAX(post_date) ... GROUP BY user_id` is invalid because `post_date` alone doesn't collapse down to one value per group.
+- Doesn't replace `CASE WHEN` and isn't replaceable by it — `CASE WHEN` has no mechanism to compare a row against every other row in its group; that cross-row comparison is exactly what `MIN`/`MAX` exist to do.
+- Same `WHERE`-can't-see-`SELECT`-aliases rule as everything else (§13's `AGE` note) — a `HAVING`/`WHERE` condition referencing a `MIN`/`MAX` needs the full aggregate expression, not a `SELECT`-list alias for it.
+
+---
+
+## 18. `value::type` — Cast Operator
+
+**What it does:** Converts a value from one Postgres type to another. `expression::type` — the type name goes directly after the value, separated by two colons. Most commonly used here to narrow a `timestamp` (date + time-of-day) down to a plain `date` (date only), which **drops the time-of-day component entirely** rather than rounding or truncating it into the date.
+
+**Form used so far:**
+```sql
+select max(post_date::date) - min(post_date::date) as days_between
+from posts
+group by user_id;
+```
+`post_date` is a `timestamp` column (e.g. `2021-07-12 19:00:00`). Casting each side to `::date` strips the time (`2021-07-12`), so subtracting the two dates isn't polluted by time-of-day differences between individual posts.
+
+**The key gotcha this unlocked — `date - date` vs `timestamp - timestamp` vs `AGE`:**
+- **`date - date`** (both sides cast to plain `date`) returns a **plain integer** — the literal count of days between them. No interval type, no calendar breakdown, just a number. This is what a question asking for a flat "number of days" wants.
+- **`timestamp - timestamp`** (no cast) returns an `interval`, and if the two timestamps have different times-of-day, that interval carries extra hours/minutes noise (`2 days 7:00:00` instead of a clean `2`).
+- **`AGE(timestamp1, timestamp2)`** (§13) also returns an `interval`, but a *calendar-broken-down* one (`7 mons 17 days`) — structurally different from a day count and not convertible to one by just reading off a field, since "7 months" isn't a fixed number of days.
+- Rule of thumb: need a **single flat day count** → cast to `::date` and subtract. Need a **human-readable calendar age/span** → `AGE()`. They are not interchangeable, and reaching for `AGE()` when a plain integer is wanted produces the wrong *shape* of answer, not just a formatting difference. (MASTER-GUIDE Entry #19.)
+
+**What it can't do:**
+- `::date` on a value that's already just a `date` is a harmless no-op, but casting the wrong direction (e.g. trying to squeeze a `timestamp`'s time-of-day back out of an already-cast `date`) isn't possible — the time is gone, not hidden.
+- Casting doesn't fix a type mismatch that's conceptually wrong (e.g. `'abc'::integer` still errors) — it only works between types that have a sensible conversion.

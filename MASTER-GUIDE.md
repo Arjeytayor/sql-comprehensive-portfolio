@@ -37,6 +37,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 16 | Conditional aggregation — `CASE WHEN`/`IN` nested inside `COUNT`, `COUNT` vs `COUNT(DISTINCT ...)` | DataLemur — Candidates with all required skills | `IN` as OR-shorthand; reading a nested expression inside-out; why plain `COUNT` silently over-counts on duplicate rows and `COUNT(DISTINCT ...)` is the safe general version |
 | 17 | `LEFT JOIN` + `IS NULL` anti-join pattern; why `INNER JOIN` can't find "no match" rows | DataLemur — Facebook pages with zero likes | `LEFT JOIN` keeps every left-table row even with no match, filling `NULL` on the right side; `INNER JOIN` drops unmatched rows before there's anything left to filter; ambiguous-column fix (Entry #4) reapplied post-JOIN |
 | 18 | `WHERE` vs `GROUP BY` vs `CASE WHEN` as a filter; clause order; `ISNULL` as Postgres's one-word `IS NULL` | DataLemur — Unfinished parts | Filtering (keep/discard rows) is a `WHERE` job, not `GROUP BY` (collapses rows) or a standalone `CASE WHEN` (produces a value, not a boolean gate); correct clause order; `SELECT *` vs matching the asked-for columns; Postgres-only `ISNULL`/`NOTNULL` legacy syntax |
+| 19 | `MIN`/`MAX` per group, `AGE` vs `date - date`, why `CASE WHEN` can't substitute for a cross-row comparison | DataLemur — Facebook posts, days between first and last post of 2021 | `MIN`/`MAX` compare across a whole group, `CASE WHEN` only ever looks at one row; `EXTRACT(...) = year` for a row-level year filter in `WHERE`; `AGE()`'s calendar-broken-down interval vs. `::date` cast + subtraction for a flat integer day count; `WHERE` can't see `SELECT`-list aliases (reapplied from Entry #13) |
 
 ---
 
@@ -1316,4 +1317,87 @@ WHERE finish_date ISNULL
 - **Used bare `CASE WHEN` as if it were a row-filter clause** — it's an expression, not a clause; there's no such thing as a standalone `CASE WHEN` filter in SQL's grammar.
 - **Placed `GROUP BY` before `WHERE`** — invalid clause order (same category of mistake as Entry #17's `WHERE`-after-`GROUP BY`, opposite direction).
 - **Left `SELECT *` in place after fixing the row-filtering logic** — got the right rows before getting the right columns; two separate fixes, not one.
+
+## 19. `MIN`/`MAX` Per Group, `AGE` vs. `date - date`, and Why `CASE WHEN` Can't Substitute — Facebook Posts Days Between First and Last
+
+### The question
+Given `posts(user_id, post_id, post_content, post_date)`, for every user who posted **at least twice in 2021**, find the number of days between that user's **first** and **last** post of 2021. Output `user_id` and `days_between`.
+
+### Why this needs the technique it needs
+This looks like it might reuse `CASE WHEN` (Entry #16 muscle memory — "there's a condition, so use `CASE WHEN`"), but there's no per-row condition to branch on here. The question needs two things `CASE WHEN` structurally cannot do: (1) compare *every* post a user made against every other one to find the earliest and latest — a cross-row comparison, not a single-row decision — and (2) reduce a calendar-style "X months Y days" span down to one flat number. Both are jobs for aggregate functions (`MIN`/`MAX`) and a plain arithmetic subtraction, not for an expression that only ever looks at one row at a time.
+
+### Real-world version of this same problem
+A fitness app logs a timestamp every time you check in at the gym, all year. At the end of the year it wants to tell you "you were active for a 47-day stretch, from your first visit to your last." It doesn't ask, row by row, "is this visit the first one? is this one the last one?" — it lays every visit date out, picks the earliest and the latest from the whole pile, and does one subtraction. If you'd only visited once, "days between first and last" wouldn't even mean anything — hence the "at least twice" requirement gating who shows up in the result at all.
+
+### The concept, explained from zero
+
+**`MIN(column)` / `MAX(column)` scan an entire group and return one extreme value** — the smallest or largest — collapsing many rows down to one. Like `COUNT`/`SUM`/`AVG`, they only make sense per group (`GROUP BY user_id` here): each user's pile of `post_date` values gets reduced to that one user's earliest and latest date.
+
+**`CASE WHEN` cannot do this.** It evaluates one row at a time and returns a value based on that row's own columns — it has no way to "see" any other row to compare against. "Which of this user's posts is earliest" isn't answerable by inspecting a single post in isolation; it requires comparing across the whole group, which is exactly what aggregates like `MIN`/`MAX` exist for and `CASE WHEN` cannot do.
+
+**`EXTRACT(YEAR FROM column) = 2021` in `WHERE`** filters individual rows down to just 2021 posts, before any grouping happens — the same `EXTRACT` function from Entry #12/§9, applied as a row-level equality test instead of feeding a `GROUP BY`.
+
+**`HAVING COUNT(*) >= 2`** filters *groups* after they've formed — "at least twice" is a fact about the group (how many rows survived into it), not about any individual row, so it has to be a `HAVING` condition, not a `WHERE` one.
+
+**`AGE(date1, date2)` (§13) returns a calendar-broken-down `interval`** — "7 mons 17 days" for a 7-month gap. That's structurally different from a plain integer day count, even though for a short, same-month gap it can *look* like one (a 2-day gap prints as "2 days," which is misleadingly close to the number `2`).
+
+**`value::date` (§18) casts a `timestamp` down to a `date`, dropping the time-of-day.** Once both sides of a subtraction are `date` type, `date2 - date1` returns a **plain integer** — the flat number of days between them, with no calendar-unit breakdown and no interval type to unpack. This, not `AGE()`, is the right tool whenever the expected output is a single number.
+
+**`WHERE` still can't see a `SELECT`-list alias** (same rule as Entry #13's `AGE`/`date_days` trap) — a year-alias defined in `SELECT` isn't available yet when `WHERE` runs, so the full `EXTRACT(...)` expression has to be repeated rather than referenced by name.
+
+### The logic used to solve it (the actual reasoning trace)
+
+1. **First attempt:** `SELECT user_id, age(post_date) FROM posts GROUP BY user_id;` — one-argument `AGE()` (compares to *right now*, not to another post) sitting on a bare, ungrouped `post_date` column next to `GROUP BY user_id` — the same "raw column beside a `GROUP BY`" problem from Entry #4.
+2. **Learned `AGE` takes a two-argument form** for an explicit span between two dates, and reached for `MIN`/`MAX` to supply those two dates — but wrote `age(MIN(post_date), MAX(post_date))`, earliest minus latest, which subtracts backwards.
+3. **Swapped the order** to `age(MAX(post_date), MIN(post_date))` — later minus earlier, correct direction.
+4. **Tried to add the 2021 filter and the "2+ posts" condition**, but placed `HAVING post_date == 2021` *before* `FROM` (invalid clause order), used `==` (not valid SQL), used `HAVING` for what's actually a per-row condition, and dropped the "2+ posts" `HAVING` requirement entirely in the process.
+5. **Moved the condition into `WHERE`** (correct clause) but kept `post_date == 2021` — still the wrong operator, and still comparing a full timestamp directly to a bare year number, which doesn't test the year at all.
+6. **Attempted to wrap the year-check in `EXTRACT` while also nesting `AGE`/`MIN`/`MAX` in the same expression** — mismatched parentheses, functions nested inside each other without a clear purpose for each layer.
+7. **Isolated just the `WHERE` line** and rebuilt it cleanly: `EXTRACT(YEAR FROM posts.post_date) = 2021` — but then referenced the `SELECT`-list alias `post_year` inside `WHERE` (`where post_year is 2021`), using `is` instead of `=`, and dropped the `MIN`/`MAX`/`AGE` piece from `SELECT` entirely while focused on this one line.
+8. **Fixed both**: replaced `is` with `=`, and replaced the alias reference with the full `EXTRACT(...)` expression written out again — `WHERE` line now correct and self-contained.
+9. **Rebuilt `SELECT`** as `AGE(MAX(post_date), MIN(post_date))`, added `HAVING COUNT(*) >= 2` in the correct position, and added the `AS days_between` alias — query now ran and returned syntactically valid results.
+10. **Checked whether `CASE WHEN` could replace any of this** — correctly reasoned out, unprompted, that it couldn't: `MIN`/`MAX` need to compare across rows, and `CASE WHEN` only ever evaluates one row at a time.
+11. **Noticed the output was shaped wrong**: `AGE()` returned `"months":X,"days":Y`, not a plain integer, even after adding `::date` casts *inside* the still-present `AGE()` call — the cast alone didn't fix it, because the problem was `AGE()` itself, not the operand types.
+12. **Dropped `AGE()` entirely**, replacing it with `MAX(post_date::date) - MIN(post_date::date) AS days_between` — plain integer output (`206`, `307`), submitted and accepted.
+
+### A hand-trace through the sample data
+Sample rows: `151652` posted 07/10 and 07/12; `661093` posted 07/08 and 07/29; `004239` posted once (07/04) — only one post, doesn't qualify.
+
+- `WHERE EXTRACT(YEAR FROM post_date) = 2021` keeps every row (all sample rows are already 2021) — this filter matters more once other years exist in the full dataset.
+- `GROUP BY user_id` collects each user's posts into their own group: `151652` → {07/10, 07/12}, `661093` → {07/08, 07/29}, `004239` → {07/04}.
+- `HAVING COUNT(*) >= 2` drops `004239` (only 1 row) — never reaches the `SELECT` output.
+- For `151652`: `MAX(post_date::date)` = 07/12, `MIN(post_date::date)` = 07/10 → `07/12 - 07/10 = 2`.
+- For `661093`: `MAX` = 07/29, `MIN` = 07/08 → `07/29 - 07/08 = 21`.
+- Matches the example output exactly: `151652 → 2`, `661093 → 21`.
+
+### Full solution
+
+```sql
+SELECT user_id, MAX(post_date::date) - MIN(post_date::date) AS days_between
+FROM posts
+WHERE EXTRACT(YEAR FROM post_date) = 2021
+GROUP BY user_id
+HAVING COUNT(*) >= 2;
+```
+
+### The pattern to remember
+
+**"Find the earliest/latest value in a group" is a `MIN`/`MAX` job, not a `CASE WHEN` job** — `CASE WHEN` only ever sees one row at a time and has no mechanism to compare across rows. And **"give me a flat number of days" means `date - date` (cast with `::date` first), not `AGE()`** — `AGE()` answers a different question (a calendar-style span), and its output only coincidentally resembles a plain day count for gaps that stay inside one month.
+
+### Best practices / general approach — if you see this kind of question again
+
+- **Before reaching for `CASE WHEN`, ask whether the decision needs to compare a row against other rows, or just needs to look at that row alone.** Cross-row comparisons are `MIN`/`MAX`/`SUM`/other aggregates' job.
+- **"Number of days" in the expected output is a strong signal to use `date - date`, not `AGE()`.** Reserve `AGE()` for when the expected output actually looks like a calendar span ("X years Y months").
+- **Test a fix's *output shape*, not just whether the query runs.** Adding `::date` casts inside a still-present `AGE()` call ran fine and returned no error — but it didn't fix the actual problem, because the wrong function was still in use. A syntactically valid query can still return the wrong *kind* of value.
+- **Build and verify one clause in isolation when a multi-clause query gets tangled** (as with isolating just the `WHERE` line here) rather than editing `SELECT`, `WHERE`, and `HAVING` all at once — easier to spot which piece is actually broken.
+- **Re-confirm the `WHERE`-can't-see-`SELECT`-alias rule stays enforced** even under pressure to move fast — this is the second time (Entry #13, now #19) an alias got referenced too early.
+
+### Mistakes made this time (new ones, not repeats)
+
+- **Used `HAVING` for a per-row condition** (`post_date == 2021`) — that belongs in `WHERE`; `HAVING` is only for conditions on the *aggregated* result.
+- **Used `==` instead of `=`** — not valid SQL, carried over from a different language's equality syntax.
+- **Compared a raw timestamp directly to a bare year number** (`post_date = 2021`) without `EXTRACT` — type mismatch that doesn't test the year at all, not just a syntax slip.
+- **Referenced a `SELECT`-list alias inside `WHERE`** (`where post_year is 2021`) — repeat of the Entry #13 `AGE`/`date_days` alias-timing trap, this time with a different function.
+- **Dropped the "2+ posts" `HAVING` condition partway through**, twice, while focused on fixing something else in the query — lost track of a previously-added requirement mid-edit.
+- **Assumed adding `::date` casts fixed the output shape without checking what `AGE()` still printed** — the casts were necessary but not sufficient; `AGE()` itself needed to be removed, not just fed differently-typed inputs.
 
