@@ -29,6 +29,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 17 | Aggregate Function | `MIN` / `MAX` |
 | 18 | Operator | `::` (cast) |
 | 19 | Clause | `LIMIT` |
+| 20 | Clause | `WITH ... AS (...)` (CTE) |
 
 ---
 
@@ -268,6 +269,13 @@ having count(distinct case when skill in (...) then skill end) = 3
 ```
 Counts only *unique* non-`NULL` values — critical when a duplicate row could otherwise let a `CASE WHEN ... THEN 1` version over-count and pass a `HAVING` check it shouldn't (Entry #16's duplicate-`Python`-rows trace).
 
+**`COUNT(DISTINCT entity_id_column)` on top of a CTE — which column goes inside `DISTINCT`, now used:**
+```sql
+select count(distinct company_id) as duplicate_companies
+from companies_dup   -- a CTE that may list the same company on more than one row
+```
+The column inside `DISTINCT` must be the ID column of the real-world *entity* the question is asking to count — not any column that merely looks unique in the sample data you're staring at. A `title` or `description` column can coincidentally repeat across two unrelated entities (two different companies both posting a "Business Analyst" listing), silently collapsing a correct count of 2 down to a wrong count of 1. `DISTINCT` is also still required even on a column that *does* correctly identify the entity, because that entity's ID can legitimately repeat across multiple rows for reasons that have nothing to do with the count being asked for (one company appearing on two separate rows of a CTE because it duplicated two different job listings, not because it's "more duplicate"). See MASTER-GUIDE Entry #21.
+
 **Other forms it supports (not yet used here):**
 - `COUNT(column)` on a genuine table column (not a `CASE` expression) — count of non-`NULL` values in that column.
 
@@ -486,3 +494,27 @@ limit 2;
 - **Means nothing reliable without `ORDER BY` first.** `LIMIT` without a preceding `ORDER BY` returns *some* 2 rows, but which 2 is unspecified/arbitrary — it doesn't know "top" means "highest" unless `ORDER BY` already established the sort direction.
 - Isn't a filtering condition — can't express "rows where count > 5" or any value-based test; that's still `WHERE`/`HAVING`'s job. `LIMIT` only ever answers "how many rows," never "which rows qualify."
 - Goes at the very end of the clause sequence — after `ORDER BY`, last of all: `SELECT ... FROM ... WHERE ... GROUP BY ... HAVING ... ORDER BY ... LIMIT`.
+
+---
+
+## 20. `WITH name AS (...)` — Clause (Common Table Expression / CTE)
+
+**What it does:** Runs the query inside the parentheses first, names its result, and lets everything below treat that result as if it were a real table — with real column names — for the rest of the statement. Exists only for the duration of that one statement; nothing is saved.
+
+**Form used so far:**
+```sql
+WITH companies_dup AS (
+  SELECT company_id, title, description, COUNT(*) AS posting_count
+  FROM job_listings
+  GROUP BY company_id, title, description
+  HAVING COUNT(*) > 1
+)
+SELECT COUNT(DISTINCT company_id) AS duplicate_companies
+FROM companies_dup;
+```
+Solves a two-level aggregation: the CTE finds every duplicated `(company, title, description)` group first, fully finishing that work; the outer query then runs a second, separate aggregate (`COUNT(DISTINCT ...)`) on top of the CTE's finished output. See MASTER-GUIDE Entries #1 and #21.
+
+**What it can't do:**
+- **The closing `)` ends the CTE's inner query, not the whole statement.** A `;` placed *inside* the parentheses (before that `)`) terminates the entire statement early and cuts off the outer `SELECT` that was meant to follow — the `;` belongs only at the very end, after the outer query.
+- An alias given to a column *inside* the CTE (e.g. `COUNT(*) AS posting_count`) should describe what that value means at that level, not what the outer query will eventually do with it — naming the CTE's own `COUNT(*)` something like `duplicate_companies` is misleading, since at that point it's still "how many times this one posting repeated," not a count of companies.
+- A column carried through from the CTE (like `company_id`) is not guaranteed unique per row in the CTE's own output — it can repeat across multiple rows for reasons unrelated to what's being counted (see the `COUNT(DISTINCT ...)` entry-identity note in §10).

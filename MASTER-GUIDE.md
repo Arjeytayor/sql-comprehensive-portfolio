@@ -39,6 +39,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 18 | `WHERE` vs `GROUP BY` vs `CASE WHEN` as a filter; clause order; `ISNULL` as Postgres's one-word `IS NULL` | DataLemur — Unfinished parts | Filtering (keep/discard rows) is a `WHERE` job, not `GROUP BY` (collapses rows) or a standalone `CASE WHEN` (produces a value, not a boolean gate); correct clause order; `SELECT *` vs matching the asked-for columns; Postgres-only `ISNULL`/`NOTNULL` legacy syntax |
 | 19 | `MIN`/`MAX` per group, `AGE` vs `date - date`, why `CASE WHEN` can't substitute for a cross-row comparison | DataLemur — Facebook posts, days between first and last post of 2021 | `MIN`/`MAX` compare across a whole group, `CASE WHEN` only ever looks at one row; `EXTRACT(...) = year` for a row-level year filter in `WHERE`; `AGE()`'s calendar-broken-down interval vs. `::date` cast + subtraction for a flat integer day count; `WHERE` can't see `SELECT`-list aliases (reapplied from Entry #13) |
 | 20 | `ORDER BY` + `LIMIT` for "top N"; compound `EXTRACT` filters joined with `AND`; third repeat of `WHERE`-before-`GROUP BY` (self-caught) | DataLemur — Microsoft Teams power users, top 2 senders in August 2022 | "Top N" is a sort-then-cut operation (`ORDER BY` + `LIMIT`), never a `WHERE`/`HAVING` threshold guess; `EXTRACT` takes exactly one part per call, so "this month of this year" needs two `EXTRACT(...) = value` conditions `AND`ed together, not one call with two parts |
+| 21 | First CTE since Entry #1; `COUNT(DISTINCT entity_id)` must wrap the *entity's own ID column*, never an attribute that merely looks unique in the sample data; a repeated ID across CTE rows isn't "more duplicate" | DataLemur — LinkedIn duplicate job listings, count of companies with duplicate postings | `GROUP BY` on N columns = one row per distinct N-tuple, `COUNT(*)` in that row = repeat count of that tuple in the source table; a CTE's carried-through column isn't guaranteed unique per row; `title`/`description` can coincidentally collide across unrelated companies, silently undercounting; primary key vs. foreign key, reapplied (Entry #4) — `company_id` is a FK in `job_listings` but still the correct entity-ID to `DISTINCT` on |
 
 ---
 
@@ -1467,4 +1468,102 @@ LIMIT 2;
 - **Repeated the `WHERE`-after-`GROUP BY` clause-order mistake for the third time** (Entries #17, #18, now this one) — self-caught this time, unprompted, mid-fix, rather than needing it pointed out.
 - **Combined two `EXTRACT` parts into one call** (`EXTRACT(year, month FROM sent_date)`) — not valid syntax; `EXTRACT` only ever takes one named part.
 - **Wrote `08/2022` as a bare literal** — evaluates as division (`08 / 2022`), not a date comparison of any kind.
+
+---
+
+## 21. First Real CTE Since Entry #1, and Which Column `COUNT(DISTINCT ...)` Must Wrap — LinkedIn Duplicate Job Listings
+
+### The question
+Given `job_listings(job_id, company_id, title, description)`, find the count of companies that have posted duplicate job listings. A duplicate is defined as **two listings within the same company** that share an identical `title` and `description`. Output one number, `duplicate_companies`.
+
+### Why this needs the technique it needs
+This is Entry #1's exact two-level shape wearing a new costume: **Level 1** is "which specific postings got repeated, and by whom" — a `GROUP BY` on `company_id, title, description` with `COUNT(*)` and a `HAVING COUNT(*) > 1` filter, all computed from the raw `job_listings` rows. **Level 2** is "how many distinct companies show up among those repeats" — a second aggregate that can only run *after* Level 1 has already finished and produced its own finished result to count over. A single flat `GROUP BY`/`HAVING` can't do both at once, for the same reason as Entry #1: the thing Level 2 needs to count (rows of Level 1's output) doesn't exist yet while Level 1 is still being computed. That's what a CTE is for — finish Level 1, name its result, then run Level 2 on top of it as if it were a real table.
+
+The second, subtler thing this question needs: once Level 1's result exists, which of its columns should `COUNT(DISTINCT ...)` wrap? The question asks for a count of **companies**, and `company_id`, `title`, and `description` all happen to look "unique enough" in the small sample data given — but only one of those three columns is actually guaranteed, by definition, to identify one specific company and no other, regardless of what any particular dataset happens to contain.
+
+### Real-world version of this same problem
+A landlord manages several rental listings across different property-management companies advertising on the same listings site. Two different, unrelated companies each independently list a "2-bedroom apartment, downtown" with the exact same boilerplate description — pure coincidence, they just wrote similar ads. Meanwhile, one single company accidentally posts the *same* "Studio apartment, riverside" listing twice by mistake.
+
+If you tried to answer "how many companies have posted a duplicate listing" by counting **distinct listing descriptions** that appear more than once, you'd wrongly catch the two unrelated companies' coincidentally-similar "2-bedroom downtown" ads as if one company had duplicated itself — when really it's two different companies who just happen to describe a common apartment type similarly. The only column that correctly answers "how many *companies*" is the company's own ID — an attribute like the ad's wording can coincidentally repeat across totally unrelated companies, but a company's ID, by definition, never means two different companies.
+
+### The concept, explained from zero
+
+**CTE mechanics — recap from Entry #1, not new:** `WITH name AS (query)` runs `query` first, names its result `name`, and lets the rest of the statement treat `name` as a real table. See Entry #1 for the full from-zero breakdown if this part is rusty.
+
+**What's genuinely new here: `GROUP BY` on *three* columns at once, with `COUNT(*)` alongside them in `SELECT`.** `GROUP BY company_id, title, description` collapses the raw table down to one row *per distinct combination* of those three values — not one row per company, not one row per title. `COUNT(*)` in that same `SELECT` then reports, for each surviving combination, how many raw rows in `job_listings` shared that exact combination. A combination that appears once is not a duplicate; `HAVING COUNT(*) > 1` throws those away, keeping only combinations that genuinely repeated.
+
+**The part that actually caused the trouble: a column carried through a `GROUP BY` is not guaranteed unique per row in the result, even a column like `company_id` that identifies something real.** If one company duplicates *two different* listings (say, both a "Business Analyst" posting and, separately, an unrelated "Officer Security" posting), that one company produces **two separate rows** in the CTE's output — one row per distinct `(company_id, title, description)` group, not one row per company. So `company_id` repeats across rows of the CTE for a completely legitimate reason that has nothing to do with "this company is extra duplicate."
+
+**Why `COUNT(DISTINCT company_id)`, specifically, and not `COUNT(DISTINCT title)` or plain `COUNT(company_id)`:**
+- Plain `COUNT(company_id)` would count *rows*, not companies — the two-duplicate-groups company from above would get counted twice, inflating the answer for one company that only deserves to count once.
+- `COUNT(DISTINCT title)` (or `description`) is wrong for a different reason: those are attributes, not identifiers. Two completely unrelated companies can coincidentally post a listing with the identical title text (this actually happens in this exact question's own sample data — see the hand-trace below), which would silently *undercount* by collapsing two real companies into what looks like one distinct title.
+- `COUNT(DISTINCT company_id)` is correct because `company_id`'s entire purpose is to identify one specific company and no other — genuinely unique to that entity by definition, not just by coincidence of a small sample — while still correctly collapsing that one company down to a count of 1 even if it shows up on multiple CTE rows.
+
+Worth being precise about one more thing: `company_id` is **not** the primary key of `job_listings` — a company can post many listings, so the same `company_id` legitimately repeats across many raw rows of that table (it's a foreign key here, same PK vs. FK distinction as Entry #4). The rule isn't "`DISTINCT` whatever column is a primary key of the table you're querying" — it's "`DISTINCT` whatever column is the ID of the entity the question is actually asking you to count," even when that column shows up as a foreign key, with repeats, in the table sitting in front of you.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **Correctly guessed the outer aggregate early** — `count(distinct(company_id)) as duplicate_companies` — before the surrounding two-level structure was assembled. Right ending, no scaffolding around it yet.
+2. **Needed a refresher on CTE syntax itself** ("what do you mean?") — Entry #1 was old enough to need re-explaining from the `WITH name AS (...)` shape up.
+3. **First full attempt had two bugs at once:**
+   ```sql
+   WITH companies_dup AS
+   (SELECT company_id, title, description, COUNT(*) AS duplicate_companies
+   FROM job_listings
+   GROUP BY company_id, title, description
+   HAVING COUNT(*) > 1;)
+   select c
+   ```
+   (a) the `;` sat *inside* the CTE's closing parenthesis, ending the entire statement before an outer `SELECT` could ever attach to it; (b) the CTE's own `COUNT(*)` was aliased `duplicate_companies` — the wrong semantic name at that level, since at that point the value means "how many times this one posting repeated," not "how many companies."
+4. **Fixed both:** moved the `;` outside the CTE's parentheses (to the very end of the whole statement), renamed the inner alias to `posting_count`.
+5. **Finished the outer query:** `count(distinct(company_id)) as duplicate_companies from companies_dup;` — correct (the extra parentheses around `company_id` are harmless, just non-standard style; see SQL-REFERENCE §10).
+6. **Ran it, submitted, confirmed correct on DataLemur.**
+7. **Post-submission misconception surfaced:** believed `COUNT(DISTINCT ...)` would give the same answer no matter which column of the CTE it wrapped — "if we point it to any row in the table on the CTE our answer is the same." Tested against a counterexample (two different companies each duplicating their own "Business Analyst" listing): `COUNT(DISTINCT company_id)` correctly gives 2, `COUNT(DISTINCT title)` wrongly collapses to 1.
+8. **First attempt to explain *why* landed on "primary key"** — corrected, since `company_id` is actually a foreign key inside `job_listings`, not that table's primary key; the real rule is about identifying the *entity being counted*, not about which column happens to be a PK of the table in front of you.
+9. **Stress-tested the fully-corrected understanding unprompted**, with a scenario of one company producing two different duplicate groups (BA duplicated 3×, Officer Security duplicated 4×) alongside a second company with one duplicate group — correctly predicted `COUNT(DISTINCT company_id)` would count the first company once and the second once (2 total), regardless of how many separate duplicate-groups a single company has. Landed on the closing insight unprompted: the question only cares *whether* a company duplicated something, not *how many* distinct things it duplicated or *how many times*.
+
+### A hand-trace through the actual sample data
+Given rows:
+
+| job_id | company_id | title | description |
+|---|---|---|---|
+| 248 | 827 | Business Analyst | "Business analyst evaluates..." |
+| 149 | 845 | Business Analyst | "Business analyst evaluates..." (same wording) |
+| 945 | 345 | Data Analyst | "Data analyst reviews..." |
+| 164 | 345 | Data Analyst | "Data analyst reviews..." (same wording) |
+| 172 | 244 | Data Engineer | "Data engineer works..." |
+
+**`GROUP BY company_id, title, description`:** job `248` (company `827`) and job `149` (company `845`) share identical `title`/`description` text — but different `company_id`, so they form **two separate groups**, each with `COUNT(*) = 1`. This is the exact real-data proof of the "coincidentally identical title across unrelated companies" trap from above — if `company_id` weren't part of the grouping, these two would wrongly merge into one fake "duplicate." Job `945` and job `164` (both company `345`) match on all three columns — **one group**, `COUNT(*) = 2`. Job `172` is alone — its own group, `COUNT(*) = 1`.
+
+**`HAVING COUNT(*) > 1`:** drops both `COUNT(*) = 1` groups (the mismatched-company "Business Analyst" pair, and the lone "Data Engineer"). Only the company-`345` "Data Analyst" group survives, with `posting_count = 2`.
+
+**Outer `COUNT(DISTINCT company_id) FROM companies_dup`:** exactly one row survived, `company_id = 345` → `duplicate_companies = 1`. Matches the question's stated expected output.
+
+### Full solution
+```sql
+WITH companies_dup AS (
+  SELECT company_id, title, description, COUNT(*) AS posting_count
+  FROM job_listings
+  GROUP BY company_id, title, description
+  HAVING COUNT(*) > 1
+)
+SELECT COUNT(DISTINCT company_id) AS duplicate_companies
+FROM companies_dup;
+```
+
+### The pattern to remember
+**Two-level aggregation = a CTE that fully finishes Level 1, then a second, separate aggregate on top of it treating the CTE's output as a plain table (Entry #1's pattern, reused).** Layered on top: **whenever `COUNT(DISTINCT ...)` is meant to count a real-world entity ("how many companies," "how many users," "how many customers"), the column inside `DISTINCT` must be that entity's own ID column — never an attribute column that merely happens to look unique in the sample data in front of you.** And separately: a value repeating across multiple rows of a `GROUP BY` result isn't automatically meaningful — it can just mean "this same entity satisfied the condition more than once," which is exactly what `DISTINCT` exists to collapse back down to one.
+
+### Best practices / general approach — if you see this kind of question again
+- **"Count of [entity]" in the question wording is the signal to ask: which column *is* that entity's ID?** Don't default to whichever column looks unique in the sample rows given — a small example can make an attribute column look unique by coincidence.
+- **`GROUP BY` on multiple columns together is still just "one row per distinct combination" — no different in kind from grouping on one column,** just a wider combination key. `COUNT(*)` still means the same thing: how many raw rows shared that exact combination.
+- **A `;` always closes the entire statement, never just a `(...)` block it happens to sit inside.** In a CTE, that means the `;` belongs at the very end, after the outer query — never before the outer `SELECT` has been written.
+- **Name a CTE's internal aliases for what they mean *inside* the CTE, not for what the outer query will eventually do with them** — a count of postings-per-group is not yet a count of companies, even though a count of companies is the ultimate goal of the whole query.
+- **Primary key vs. foreign key (Entry #4) still matters here:** the correct entity-ID column to `DISTINCT` on can be a foreign key in the table you're actually querying — "is this column a PK in this table" and "is this column the right thing to count distinct values of" are two separate questions.
+
+### Mistakes made this time (new ones, not repeats)
+- **Needed a refresher on CTE syntax itself** before writing anything — the concept from Entry #1 hadn't stuck cold.
+- **Placed the closing `;` inside the CTE's own parentheses**, ending the whole statement before the outer `SELECT` could attach — new mistake, not a repeat of any prior clause-order slip.
+- **Aliased the CTE's internal `COUNT(*)` as `duplicate_companies`** — named it for what the outer query would eventually produce, not for what that value actually meant at that point in the query.
+- **Believed, after a correct and confirmed-correct submission, that `COUNT(DISTINCT ...)` would give the same result regardless of which CTE column it wrapped** — a genuine conceptual gap that survived a passing submission, since this dataset's numbers happened to work out the same either way.
+- **First attempt to name the correct reasoning called `company_id` "the primary key"** — imprecise; it's a foreign key in this table, and the real rule is about entity identity, not PK-ness of the current table.
 

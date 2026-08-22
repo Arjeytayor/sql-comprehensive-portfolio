@@ -210,3 +210,14 @@ WHERE EXTRACT(year FROM sent_date) = 2022
 GROUP BY sender_id
 ORDER BY message_count DESC
 LIMIT 2;
+
+-- DataLemur (not Chinook) — job_listings(job_id, company_id, title, description)
+-- Count of companies that have posted duplicate job listings (same title+description within the same company)
+WITH companies_dup AS (
+  SELECT company_id, title, description, COUNT(*) AS posting_count
+  FROM job_listings
+  GROUP BY company_id, title, description
+  HAVING COUNT(*) > 1
+)
+SELECT COUNT(DISTINCT company_id) AS duplicate_companies
+FROM companies_dup;
