@@ -40,6 +40,8 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 19 | `MIN`/`MAX` per group, `AGE` vs `date - date`, why `CASE WHEN` can't substitute for a cross-row comparison | DataLemur — Facebook posts, days between first and last post of 2021 | `MIN`/`MAX` compare across a whole group, `CASE WHEN` only ever looks at one row; `EXTRACT(...) = year` for a row-level year filter in `WHERE`; `AGE()`'s calendar-broken-down interval vs. `::date` cast + subtraction for a flat integer day count; `WHERE` can't see `SELECT`-list aliases (reapplied from Entry #13) |
 | 20 | `ORDER BY` + `LIMIT` for "top N"; compound `EXTRACT` filters joined with `AND`; third repeat of `WHERE`-before-`GROUP BY` (self-caught) | DataLemur — Microsoft Teams power users, top 2 senders in August 2022 | "Top N" is a sort-then-cut operation (`ORDER BY` + `LIMIT`), never a `WHERE`/`HAVING` threshold guess; `EXTRACT` takes exactly one part per call, so "this month of this year" needs two `EXTRACT(...) = value` conditions `AND`ed together, not one call with two parts |
 | 21 | First CTE since Entry #1; `COUNT(DISTINCT entity_id)` must wrap the *entity's own ID column*, never an attribute that merely looks unique in the sample data; a repeated ID across CTE rows isn't "more duplicate" | DataLemur — LinkedIn duplicate job listings, count of companies with duplicate postings | `GROUP BY` on N columns = one row per distinct N-tuple, `COUNT(*)` in that row = repeat count of that tuple in the source table; a CTE's carried-through column isn't guaranteed unique per row; `title`/`description` can coincidentally collide across unrelated companies, silently undercounting; primary key vs. foreign key, reapplied (Entry #4) — `company_id` is a FK in `job_listings` but still the correct entity-ID to `DISTINCT` on |
+| 22 | The `GROUP BY` granularity rule stated explicitly for the first time; a self-referencing JOIN condition silently becomes a cross join | Ace the Data Science Interview — Top 3 cities by completed trade orders | `GROUP BY` must contain *exactly* the non-aggregated `SELECT` columns and nothing more — every extra column re-splits rows that should collapse together; `ON table.col = table.col` (same table both sides) is always true, so every row matches every row; `COUNT(*)` vs `COUNT(column)` equivalence when no `NULL`s are possible; `RANK()` for tie-preserving "top N" vs `LIMIT`'s arbitrary cutoff (forward reference, not yet used in a submitted query) |
+| 23 | `GROUP BY` vs. a column also sitting inside the aggregate it's grouped alongside; grouping by a raw timestamp vs. `EXTRACT`; `ROUND`'s second argument; grouping by a `SELECT`-list alias | Ace the Data Science Interview — Average star rating by month and product | A column can't sit *inside* an aggregate and *in* `GROUP BY` at the same time without defeating the aggregation entirely; a `timestamp` column groups by the exact instant, not the calendar month, unless `EXTRACT` reduces it first; `ROUND(x, n)` — one argument silently rounds to a whole number, the second argument is what actually sets the decimal places; grouping by a `SELECT`-list alias is legal in Postgres (execution-order exception, ties back to Entry #12) |
 
 ---
 
@@ -1566,4 +1568,144 @@ FROM companies_dup;
 - **Aliased the CTE's internal `COUNT(*)` as `duplicate_companies`** — named it for what the outer query would eventually produce, not for what that value actually meant at that point in the query.
 - **Believed, after a correct and confirmed-correct submission, that `COUNT(DISTINCT ...)` would give the same result regardless of which CTE column it wrapped** — a genuine conceptual gap that survived a passing submission, since this dataset's numbers happened to work out the same either way.
 - **First attempt to name the correct reasoning called `company_id` "the primary key"** — imprecise; it's a foreign key in this table, and the real rule is about entity identity, not PK-ness of the current table.
+
+---
+
+## 22. The `GROUP BY` Granularity Rule, Stated Explicitly — Ace the Interview: Top 3 Cities by Completed Trade Orders
+
+### The question
+Given `trades(order_id, user_id, quantity, status, date, price)` and `users(user_id, city, email, signup_date)`, find the city and count of completed trade orders for that city, restricted to the **top 3 cities** by that count, descending.
+
+### Why this needs the technique it needs
+The output has to be **one row per city** — not one row per user, not one row per order. `trades` and `users` have to be joined first (the city lives on `users`, the order/status lives on `trades`), then every row belonging to the same city has to collapse into a single group before `COUNT` can tally it. That collapsing step is `GROUP BY`'s entire job — but `GROUP BY` doesn't automatically know "collapse down to one row per city." It collapses down to one row per *distinct combination of whatever columns you list*. List one column too many, and the grouping keeps that column intact as a separate axis, which quietly reopens exactly the split you were trying to close.
+
+### Real-world version of this same problem
+A delivery company wants to know which 3 warehouses shipped the most completed orders. If the report groups by warehouse *and* by driver, San Francisco's warehouse — which uses 12 different drivers — doesn't show up as "412 completed orders," it shows up as 12 separate tiny rows, one per driver, each reporting maybe 20-40 orders. San Francisco never gets the chance to compete for a top-3 spot as a warehouse, because the report never actually computed "San Francisco" as a single number — it computed "San Francisco-via-driver-A," "San Francisco-via-driver-B," and so on, each too small to rank highly on its own.
+
+### The concept, explained from zero
+
+**What `GROUP BY col1, col2, ...` actually collapses rows into:** one output row *per distinct combination* of every column named in the `GROUP BY` list — not one row per "the thing you're conceptually trying to count." If two rows share `city` but differ on any other column also named in `GROUP BY`, they land in different groups, even though they'd both intuitively belong under the same city.
+
+**The rule this session crystallized:** `GROUP BY` should contain **exactly** the non-aggregated columns that appear in `SELECT` — nothing more, nothing that isn't also in `SELECT`. If `SELECT` only asks for `city` and `COUNT(status)`, then `GROUP BY` should only name `city`. Any additional column in `GROUP BY` — even one that seems harmless, even one that isn't in `SELECT` at all — re-introduces a split that the question never asked for, because `GROUP BY` doesn't distinguish "a column I need for grouping" from "a column I was just curious about."
+
+**Why this one rule catches both of this session's `GROUP BY` mistakes at once:** Attempt 1 grouped by `users.city, trades.user_id, trades.status` — three columns — while `SELECT` only ultimately needed `city` and a count. `user_id` alone guarantees a new group per person (nobody shares a `user_id`), so a city with 3 different completed-order customers split into 3 rows of count 1 each, instead of 1 row of count 3. `status` added a second, redundant split on top of that, even though `WHERE status = 'Completed'` had already thrown away every non-`'Completed'` row before grouping ever ran — grouping by a column that's already constant to a single value across every remaining row can't cause visible harm by itself, but it's still an extra axis with no purpose, and it signals the same "throw every column I can see into `GROUP BY`" habit that *did* cause harm via `user_id`.
+
+**The second, unrelated bug — a self-referencing `JOIN` condition:** `join users on trades.user_id = trades.user_id` names `trades` on *both* sides of the `=`. That condition is comparing a column to itself — always true, for every row, regardless of what's actually in `users`. Postgres has no way to know this was a typo instead of an intentional (if useless) condition; it just matches every row of `trades` against every row of `users`, because the stated condition never actually excludes any pairing. That's a **cross join wearing a JOIN's syntax** — the row count silently balloons, and every downstream `GROUP BY`/`COUNT` is now operating over `(user count) × (correct row count)` duplicated rows instead of the real ones. The fix is mechanical once spotted: a JOIN condition must always name a column from each of the *two different* tables being joined, never the same table twice.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **First attempt correctly identified the join, the filter, and the aggregate** — `INNER JOIN`, `WHERE status = 'Completed'`, `COUNT`, `ORDER BY ... DESC LIMIT 3` — all the right pieces were present from the start. The bug was purely in *which* columns went into `GROUP BY` and `SELECT`, not in the overall shape of the query.
+2. **`GROUP BY users.city, trades.user_id, trades.status`** produced a result where a city with several different completed-order customers came back as several rows of count 1, instead of collapsing to its true total — the tell that something was over-splitting.
+3. **Also flagged: `trades.user_id` sitting in `SELECT`** even though the question's expected output was just `city` + a count — an extra column that doesn't belong in the final answer at all, separate from (but caused by) the same over-grouping instinct.
+4. **Second attempt fixed the `SELECT`/`GROUP BY` mismatch but introduced the self-join bug** — `join users on trades.user_id = trades.user_id` — while also still carrying `user_id` in `SELECT` without it being present in `GROUP BY` (which strict SQL treats as an error: every non-aggregated `SELECT` column must appear in `GROUP BY`).
+5. **Final draft dropped every extra column at once** — `SELECT city, COUNT(status)`, `GROUP BY users.city` only, and the join condition corrected to `users.user_id = trades.user_id` (two different tables, as it should always be). Submitted and confirmed correct.
+
+### A hand-trace (illustrative — not the platform's actual sample data)
+Given three completed trades all belonging to San Francisco, from three different users:
+
+| order_id | user_id | status | city (via join) |
+|---|---|---|---|
+| 101 | 501 | Completed | San Francisco |
+| 102 | 502 | Completed | San Francisco |
+| 103 | 503 | Completed | San Francisco |
+
+**`GROUP BY city, user_id, status`** (the buggy version): three distinct `(city, user_id, status)` combinations exist here — `(SF, 501, Completed)`, `(SF, 502, Completed)`, `(SF, 503, Completed)` — so this produces **three rows**, each `COUNT = 1`. San Francisco's true total (3) never appears anywhere in the output; it's scattered across three rows that each look unremarkable next to a city with one big legitimate count of 3.
+
+**`GROUP BY city`** (the fix): all three rows share the same `city` value and nothing else is in the grouping list, so they collapse into **one row**: `San Francisco, COUNT = 3`. That's the number that can actually compete for a top-3 spot.
+
+### Full solution
+```sql
+select city, count(status) as total_orders
+from trades
+join users on users.user_id = trades.user_id
+where status = 'Completed'
+group by users.city
+order by total_orders desc
+limit 3;
+```
+
+### The pattern to remember
+**`GROUP BY` should contain exactly the non-aggregated columns that appear in `SELECT` — never more.** Before running a grouped query, check every column named in `GROUP BY` against the `SELECT` list: if a `GROUP BY` column isn't something the question actually needs broken out in the final output, it doesn't belong there, because it will silently re-split rows that were supposed to collapse together. Separately: **a `JOIN ... ON` condition must always name one column from each of the two tables being joined** — the same table appearing on both sides of the `=` is a red flag that reads as valid SQL but expresses "always true," not a real relationship.
+
+### Best practices / general approach — if you see this kind of question again
+- **Before writing `GROUP BY`, write out the exact `SELECT` list the question asks for first.** Every column in that list that isn't wrapped in an aggregate function is a mandatory `GROUP BY` entry; every column *not* in that list has no business being in `GROUP BY` either, no matter how "related" it feels.
+- **If a grouped result has more rows than expected, or a value that should clearly be one number is instead scattered across several small rows, suspect over-grouping first** — check whether an extra column snuck into `GROUP BY`.
+- **Read every `JOIN ... ON` condition and confirm it names a column from each side** — a same-table comparison is always syntactically valid, so nothing will error; it will just silently multiply rows.
+- **`COUNT(*)` vs. `COUNT(column)`:** functionally identical here since `status` is never `NULL` on a row that survived `WHERE status = 'Completed'` — but `COUNT(*)` states the intent more clearly ("how many rows in this group"), while `COUNT(column)` reads as if it's deliberately checking that column for `NULL`s, which isn't actually the point of this particular count.
+- **Ties for the last spot in a "top N" query:** `LIMIT 3` alone picks whichever 3 rows come out on top *after* `ORDER BY`, and if the 3rd and 4th place cities are tied on count, which one gets included is arbitrary — `LIMIT` has no concept of "these two are equally deserving." `RANK()` (a window function, not yet used in a submitted query here — flagged for later practice) numbers rows by value and **repeats a rank number across ties, then skips the number(s) that would have followed** (two rows tied for 3rd both get rank 3, and the next distinct value gets rank 5, not 4) — wrapped in a subquery/CTE and filtered with `WHERE rank <= 3`, it would keep *every* city tied for the cutoff spot instead of arbitrarily keeping just one. Also worth banking now: a window function's result isn't available yet by the time `WHERE` runs, so `RANK() ... WHERE rank <= 3` in the same query block errors — the rank has to be computed first (inside a subquery or CTE), then filtered on in an outer query.
+
+### Mistakes made this time (new ones, not repeats)
+- **Grouped by three columns (`city`, `user_id`, `status`) when only `city` belonged in `GROUP BY`** — the first concrete example, this project, of the general over-grouping trap rather than a specific prior repeat.
+- **Carried `user_id` into `SELECT`** even though the question's expected output never asked for it — an extra column riding along with the over-grouping instinct.
+- **Wrote a self-referencing JOIN condition** (`trades.user_id = trades.user_id`) — a new mistake shape, distinct from the ambiguous-column trap in Entry #4 (that was about *naming*; this is about the condition itself being logically vacuous).
+
+---
+
+## 23. `GROUP BY` vs. an Aggregated Column, and `ROUND`'s Second Argument — Ace the Interview: Average Star Rating by Month and Product
+
+### The question
+Given `reviews(review_id, user_id, submit_date, product_id, stars)`, find the average star rating, rounded to 2 decimal places, per product per month — output columns `mth`, `product_id`, `avg_stars`, sorted by month then product.
+
+### Why this needs the technique it needs
+Two different "shrink the data down" operations are needed here, and they can't be sloppy about which columns they touch. First, `submit_date` is a full timestamp (e.g. `2023-06-08 14:22:00`), but the question only cares about the **month** — so `EXTRACT(MONTH FROM submit_date)` has to run before grouping, or every review keeps its own distinct minute-level timestamp and nothing ever collapses into a shared month. Second, `stars` is the value being *averaged*, so it must appear only inside `AVG(stars)` — the moment `stars` also appears in `GROUP BY`, the query stops averaging across each month/product group and instead creates one group per distinct star rating too, which defeats the entire point of computing an average (an average of a group that's already been split down to a single star value is just that same value back).
+
+### Real-world version of this same problem
+A store manager wants "average rating per product per month" for a dashboard. If the report groups by `product_id`, `stars`, and the raw timestamp of each review, it doesn't produce an average at all — it produces a giant list of every individual 5-star review, every individual 4-star review, etc., each shown as its own row with "average = 5" or "average = 4," because each group only ever contains reviews that already share that exact star value. The manager doesn't get "this product averaged 4.2 stars in June" — they get a spreadsheet exploded back out into something close to the raw review list, with the averaging step having accomplished nothing.
+
+### The concept, explained from zero
+
+**Why a column can't sit inside an aggregate *and* in `GROUP BY` at the same time:** `GROUP BY` decides what counts as "the same group" — rows with identical values across every `GROUP BY` column land together. An aggregate function like `AVG()` then computes one summary value *per group*, by looking across every row in that group. If `stars` is itself one of the columns deciding what counts as "the same group," then by construction every row inside a single group already shares the exact same `stars` value — there's no variation left within a group for `AVG(stars)` to average over. The aggregate still runs and returns a number, so no error occurs — but that number is just the one shared `stars` value, repeated back, which reads as "the average" without doing any actual averaging.
+
+**Why grouping by the raw `submit_date` column doesn't group by month:** A `timestamp` column's value is precise down to the second (or more). Two reviews submitted on `2023-06-08` and `2023-06-18` are both "June," conceptually — but as raw `submit_date` values they're completely different timestamps, so `GROUP BY submit_date` treats them as two separate groups, one per exact date, not one shared "June" group. `EXTRACT(MONTH FROM submit_date)` has to run *before* grouping — either computed once in `SELECT` and grouped by its alias, or repeated inline in `GROUP BY` — so that what actually gets compared for "same group" is the month number, not the full timestamp.
+
+**`ROUND(numeric_expression, n)` — the second argument, now used deliberately:** `ROUND` with a single argument, `ROUND(x)`, rounds to the nearest whole number — `3.5` becomes `4`, decimal information gone entirely. `ROUND(x, n)`'s second argument specifies exactly how many decimal places to keep — `ROUND(x, 2)` keeps two digits after the decimal point (`3.5` stays recognizable as `3.50`, not collapsed to `4`). Leaving the second argument off isn't a smaller version of the same rounding — it's a different operation that throws away information the question explicitly asked to keep (2 decimal places).
+
+**Why `AVG(stars)` needs `::numeric` before `ROUND(..., 2)` can take two arguments:** Postgres's `AVG()` over an integer column returns a `numeric` type already in most cases, but the two-argument form of `ROUND` — `ROUND(numeric, integer)` — specifically requires its first argument to be `numeric`; the single-argument `ROUND(double precision)` form exists separately and doesn't accept a second argument at all. The `::numeric` cast (§18) makes the type explicit and guarantees the two-argument form is the one Postgres resolves to, rather than erroring or silently falling back to a single-argument rounding.
+
+**Grouping by a `SELECT`-list alias — legal here, unlike `WHERE`:** The final query groups by `mth`, which is the alias given to `EXTRACT(MONTH FROM submit_date)` earlier in the same `SELECT` list. Entry #12/#19 already established that `WHERE` can't see a `SELECT`-list alias, because `WHERE` runs *before* `SELECT` builds its output. `GROUP BY` is different — depending on the database, it can go either way, and **Postgres specifically permits grouping by a `SELECT`-list alias**, resolving it back to the underlying expression. It's a genuine exception worth knowing by name, not a contradiction of the earlier `WHERE` rule — different clauses, different execution-order relationships to `SELECT`.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **First attempt grouped by `product_id, stars, submit_date`** — three columns, with `stars` doubly present (once raw in `GROUP BY`, once inside `AVG(stars)` in `SELECT`) and `submit_date` left as a full timestamp rather than reduced to a month first.
+2. **`ROUND(avg(stars)::numeric)`** — called with only one argument, silently defaulting to a whole-number result instead of the requested 2 decimal places.
+3. **No `ORDER BY`** present, so the question's explicit "sort by month then product" requirement wasn't met even though the values themselves might have been directionally right.
+4. **Column order in `SELECT`** (`product_id`, `avg_stars`, `mth`) didn't match the order the question specified (`mth`, `product_id`, `avg_stars`) — a presentation-level mismatch on top of the logic bugs.
+5. **Final draft fixed all four at once:** moved `EXTRACT(MONTH FROM submit_date) AS mth` to the front of `SELECT` to match the requested column order, grouped by `product_id, mth` only (dropping `stars` and the raw `submit_date` from `GROUP BY` entirely), used `ROUND(avg(stars)::numeric, 2)` for the 2-decimal-place requirement, and added `ORDER BY mth, product_id`. Submitted and confirmed correct.
+
+### A hand-trace (illustrative — not the platform's actual sample data)
+Given three June reviews, two for the same product on different days:
+
+| review_id | product_id | submit_date | stars |
+|---|---|---|---|
+| 1 | 77 | 2023-06-08 | 3 |
+| 2 | 77 | 2023-06-18 | 5 |
+| 3 | 77 | 2023-06-25 | 4 |
+
+**Buggy version — `GROUP BY product_id, stars, submit_date`:** all three rows have distinct `submit_date` values and distinct `stars` values, so all three form **separate groups**. Each group's `AVG(stars)` is computed over exactly one row, returning that row's own `stars` value back unchanged (`3`, `5`, `4`) — no averaging has actually happened, and June's true average (`(3+5+4)/3 = 4.0`) never appears anywhere.
+
+**Fixed version — `GROUP BY product_id, mth`** (where `mth = EXTRACT(MONTH FROM submit_date) = 6` for all three rows): all three rows share `product_id = 77` and `mth = 6`, so they collapse into **one group** of three rows. `AVG(stars)` now genuinely averages across all three: `(3 + 5 + 4) / 3 = 4.0`, and `ROUND(4.0::numeric, 2)` reports it as `4.00`.
+
+### Full solution
+```sql
+SELECT extract(MONTH from submit_date) as mth,
+       product_id,
+       round(avg(stars)::numeric, 2) as avg_stars
+from reviews
+group by product_id, mth
+order by mth, product_id;
+```
+
+### The pattern to remember
+**A column that's being aggregated (sitting inside `AVG`/`SUM`/`COUNT`/etc.) must never also appear raw in that same query's `GROUP BY`** — doing so guarantees each group already shares that column's value, making the aggregate a no-op that just echoes it back. Separately: **a `timestamp` column has to be reduced to the calendar unit the question actually cares about (via `EXTRACT` or similar) *before* it can be grouped by that unit** — grouping by the raw column groups by every distinct instant, not by day/month/year. And: **`ROUND(x, n)`'s second argument is not optional decoration — it's the entire mechanism for keeping decimal places**, and Postgres's two-argument `ROUND` specifically wants a `numeric` first argument, which is what the `::numeric` cast is for.
+
+### Best practices / general approach — if you see this kind of question again
+- **Cross-check every `GROUP BY` column against every aggregate function in the same `SELECT`** — if a column appears inside an aggregate, confirm it does *not* also appear raw in `GROUP BY`.
+- **Any date/timestamp column being grouped "by month" (or year, day, etc.) needs `EXTRACT` (or equivalent) applied first** — never group by the raw column and expect it to behave like the reduced unit.
+- **A rounding requirement stated as "to N decimal places" always means the two-argument `ROUND(x, n)` form** — the one-argument form is a different, coarser operation, not a smaller version of the same one.
+- **Match `SELECT`'s column order to the order the question specifies**, not just the right columns in any order — output-matching discipline reapplied from Entry #8.
+- **Grouping by a `SELECT`-list alias works in Postgres, but referencing that alias in `WHERE` does not** (Entries #12/#19) — same alias, different clause, different execution-order rule; don't assume one implies the other.
+
+### Mistakes made this time (new ones, not repeats)
+- **Grouped by the column being averaged (`stars`) in addition to averaging it** — a new mistake shape: not an over-grouping by an unrelated extra column (Entry #22's version), but grouping by the very column the aggregate needs to vary across.
+- **Grouped by the raw `submit_date` timestamp instead of an `EXTRACT`-reduced month value** — first time this specific "aggregate at the wrong calendar granularity" mistake has shown up.
+- **Called `ROUND` with only one argument** when the question specified 2 decimal places — new mistake, distinct from any prior `ROUND` use (first time `ROUND` has been used at all in this project).
+- **`SELECT` column order didn't match the question's specified output order** — a presentation-discipline slip, not a logic bug, but still a repeat of the general "match output to what's asked" lesson from Entry #8 in a new concrete form.
 

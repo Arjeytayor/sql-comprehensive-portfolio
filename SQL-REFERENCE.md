@@ -30,6 +30,9 @@ New sections get added only after a concept has actually been practiced in a rea
 | 18 | Operator | `::` (cast) |
 | 19 | Clause | `LIMIT` |
 | 20 | Clause | `WITH ... AS (...)` (CTE) |
+| 21 | Clause | `GROUP BY` |
+| 22 | Clause | `JOIN ... ON` (condition correctness) |
+| 23 | Function | `ROUND` |
 
 ---
 
@@ -235,10 +238,19 @@ where EXTRACT(year from sent_date) = 2022
 ```
 `EXTRACT(part FROM column)` only ever takes **one** part name — `EXTRACT(year, month FROM column)` is not valid syntax. Pinning down a specific month-of-a-specific-year needs two separate `EXTRACT(...) = value` conditions, both required to hold, hence `AND` rather than a single call. See MASTER-GUIDE Entry #20.
 
+**`GROUP BY` on an `EXTRACT`ed calendar unit — now used, and the reason it's required:**
+```sql
+select extract(MONTH from submit_date) as mth, product_id, round(avg(stars)::numeric, 2) as avg_stars
+from reviews
+group by product_id, mth
+```
+`submit_date` is a full timestamp — precise to the second. `GROUP BY submit_date` (the raw column) groups by that exact instant, so two reviews on different days of the same month never share a group. `EXTRACT(MONTH FROM submit_date)` reduces the timestamp down to just the calendar unit the question cares about *first*, and grouping by that (here, via its alias `mth` — legal in Postgres, see §21) is what actually collapses same-month rows together. See MASTER-GUIDE Entry #23.
+
 **What it can't do:**
 - Only works on an actual date/timestamp-typed column — not on a plain text or integer column pretending to hold a date.
 - Only ever extracts **one** named part per call — no comma-separated list of parts in a single `EXTRACT(...)`.
 - The extracted result is invisible to other items in the *same* `SELECT` list if aliased — see the `AS year` / `COUNT(year)` trap logged in MASTER-GUIDE Entry #12. Only `GROUP BY`/`ORDER BY` can reference that alias, not a sibling `SELECT` expression.
+- Grouping by the *raw* date/timestamp column instead of an `EXTRACT`ed part groups by the exact value, not the calendar unit — a distinct trap from the alias-visibility one above (Entry #23).
 
 ---
 
@@ -468,6 +480,12 @@ group by user_id;
 - **`AGE(timestamp1, timestamp2)`** (§13) also returns an `interval`, but a *calendar-broken-down* one (`7 mons 17 days`) — structurally different from a day count and not convertible to one by just reading off a field, since "7 months" isn't a fixed number of days.
 - Rule of thumb: need a **single flat day count** → cast to `::date` and subtract. Need a **human-readable calendar age/span** → `AGE()`. They are not interchangeable, and reaching for `AGE()` when a plain integer is wanted produces the wrong *shape* of answer, not just a formatting difference. (MASTER-GUIDE Entry #19.)
 
+**`::numeric` before a two-argument `ROUND` — now used:**
+```sql
+round(avg(stars)::numeric, 2) as avg_stars
+```
+Postgres's two-argument `ROUND(numeric, integer)` — the form that lets you specify decimal places — specifically requires a `numeric` first argument; a separate one-argument `ROUND(double precision)` form exists for whole-number rounding only. `::numeric` makes the type explicit so the two-argument form resolves correctly. See §23 (`ROUND`) and MASTER-GUIDE Entry #23.
+
 **What it can't do:**
 - `::date` on a value that's already just a `date` is a harmless no-op, but casting the wrong direction (e.g. trying to squeeze a `timestamp`'s time-of-day back out of an already-cast `date`) isn't possible — the time is gone, not hidden.
 - Casting doesn't fix a type mismatch that's conceptually wrong (e.g. `'abc'::integer` still errors) — it only works between types that have a sensible conversion.
@@ -518,3 +536,75 @@ Solves a two-level aggregation: the CTE finds every duplicated `(company, title,
 - **The closing `)` ends the CTE's inner query, not the whole statement.** A `;` placed *inside* the parentheses (before that `)`) terminates the entire statement early and cuts off the outer `SELECT` that was meant to follow — the `;` belongs only at the very end, after the outer query.
 - An alias given to a column *inside* the CTE (e.g. `COUNT(*) AS posting_count`) should describe what that value means at that level, not what the outer query will eventually do with it — naming the CTE's own `COUNT(*)` something like `duplicate_companies` is misleading, since at that point it's still "how many times this one posting repeated," not a count of companies.
 - A column carried through from the CTE (like `company_id`) is not guaranteed unique per row in the CTE's own output — it can repeat across multiple rows for reasons unrelated to what's being counted (see the `COUNT(DISTINCT ...)` entry-identity note in §10).
+
+---
+
+## 21. `GROUP BY column1, column2, ...` — Clause
+
+**What it does:** Collapses rows down to one output row **per distinct combination of every column named in the list** — not one row per "the thing you're conceptually trying to count." Aggregate functions (`COUNT`, `AVG`, `SUM`, `MIN`, `MAX`, ...) elsewhere in the same `SELECT` then compute their result *per group*, across whatever rows landed in that group.
+
+**The granularity rule, now stated explicitly:**
+```sql
+select city, count(status) as total_orders
+from trades join users on users.user_id = trades.user_id
+where status = 'Completed'
+group by users.city    -- exactly the one non-aggregated column in SELECT, nothing more
+```
+`GROUP BY` should contain **exactly** the non-aggregated columns that appear in `SELECT` — no more, no less. Every extra column named in `GROUP BY` (even one that isn't in `SELECT` at all) adds another axis that rows must match on to land in the same group, silently re-splitting a group that should have collapsed into one row. See MASTER-GUIDE Entry #22.
+
+**The other half of the rule — a column can't be grouped by *and* aggregated at the same time:**
+```sql
+select product_id, extract(MONTH from submit_date) as mth, round(avg(stars)::numeric, 2) as avg_stars
+from reviews
+group by product_id, mth   -- NOT stars — stars is what AVG() is aggregating
+```
+If a column being fed into an aggregate (like `stars` into `AVG(stars)`) also appears raw in `GROUP BY`, every group ends up containing rows that already share that exact value — the aggregate still runs, but there's no variation left within a group to aggregate over, so it just echoes the single shared value back. See MASTER-GUIDE Entry #23.
+
+**Grouping by a `SELECT`-list alias — legal in Postgres, unlike `WHERE`:**
+```sql
+select extract(MONTH from submit_date) as mth, ...
+group by product_id, mth   -- "mth" here is the alias defined above, not a real column
+```
+`WHERE` runs before `SELECT` builds its output, so it can never see a `SELECT`-list alias (Entries #12/#19). `GROUP BY` sits in a different position in execution order, and Postgres specifically permits referencing a `SELECT`-list alias here, resolving it back to the underlying expression. A genuine exception, not a contradiction of the `WHERE` rule.
+
+**What it can't do:**
+- Doesn't know which columns "should" define a group beyond exactly what's listed — it has no concept of "group by city, but only really consider `user_id` if it matters." Every listed column matters equally, always.
+- Can't coexist with a column that's also inside an aggregate in the same `SELECT` without defeating that aggregate (see above) — the two roles (grouping key vs. aggregated value) are mutually exclusive for a given column within one query.
+- Doesn't reduce a timestamp column to a coarser calendar unit on its own — grouping by a raw `timestamp` groups by the exact instant; reducing to "just the month" requires `EXTRACT` (§9) run first.
+
+---
+
+## 22. `JOIN ... ON condition` — Condition Correctness
+
+**What it does:** The `ON` condition decides which rows from each side get paired together. It must name a column from each of the **two different tables** being joined — that's what makes it an actual relationship rather than a vacuous statement.
+
+**The bug this session caught — a self-referencing condition:**
+```sql
+-- wrong: both sides name the same table
+join users on trades.user_id = trades.user_id
+```
+```sql
+-- correct: one column from each table
+join users on users.user_id = trades.user_id
+```
+`trades.user_id = trades.user_id` compares a column to itself. That's always true, for every single row, regardless of anything in `users` — Postgres has no way to distinguish this from an intentional (if pointless) condition, since it's syntactically valid. The result behaves like a cross join: every row of `trades` gets paired with every row of `users`, and every downstream `GROUP BY`/aggregate now runs over a massively inflated, duplicated row set instead of the real one. See MASTER-GUIDE Entry #22.
+
+**What it can't do:**
+- Doesn't error or warn on a same-table self-reference — it's valid syntax that happens to express "always true," so nothing about running it looks wrong until the row counts or aggregate totals come out inflated.
+- Doesn't substitute for `WHERE` — a condition that's supposed to filter rows post-join still belongs in `WHERE`, not folded into `ON` (a separate concern from the same-table bug above, but worth keeping distinct).
+
+---
+
+## 23. `ROUND(numeric_expression, n)` — Function
+
+**What it does:** Rounds a number. With one argument, `ROUND(x)` rounds to the nearest whole number, discarding all decimal places. With two arguments, `ROUND(x, n)` keeps exactly `n` digits after the decimal point.
+
+**Form used so far:**
+```sql
+round(avg(stars)::numeric, 2) as avg_stars
+```
+`AVG(stars)` is cast `::numeric` first (§18) so Postgres resolves the two-argument `numeric, integer` form of `ROUND` rather than the separate one-argument `double precision` form. `2` keeps two decimal places, so `4.0` reports as `4.00`, not `4`. See MASTER-GUIDE Entry #23.
+
+**What it can't do:**
+- **One argument is not a smaller version of two arguments — it's a different operation.** `ROUND(3.567)` gives `4` (whole number, all decimal information discarded); `ROUND(3.567, 2)` gives `3.57`. Omitting the second argument when a question specifically asks for N decimal places produces the wrong *shape* of answer, not just a formatting difference.
+- The two-argument form specifically wants a `numeric` first argument — calling it on a `double precision` value (e.g. an uncast `AVG()` result, depending on context) can resolve to the wrong overload or error; `::numeric` removes the ambiguity.

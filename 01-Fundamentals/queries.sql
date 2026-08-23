@@ -221,3 +221,22 @@ WITH companies_dup AS (
 )
 SELECT COUNT(DISTINCT company_id) AS duplicate_companies
 FROM companies_dup;
+
+-- Ace the Data Science Interview (not Chinook) — trades(order_id, user_id, quantity, status, date, price), users(user_id, city, email, signup_date)
+-- Top 3 cities by count of completed trade orders
+select city, count(status) as total_orders
+from trades
+join users on users.user_id = trades.user_id
+where status = 'Completed'
+group by users.city
+order by total_orders desc
+limit 3;
+
+-- Ace the Data Science Interview (not Chinook) — reviews(review_id, user_id, submit_date, product_id, stars)
+-- Average star rating rounded to 2dp, per product per month
+SELECT extract(MONTH from submit_date) as mth,
+       product_id,
+       round(avg(stars)::numeric, 2) as avg_stars
+from reviews
+group by product_id, mth
+order by mth, product_id;
