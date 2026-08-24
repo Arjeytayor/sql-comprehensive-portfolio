@@ -33,6 +33,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 21 | Clause | `GROUP BY` |
 | 22 | Clause | `JOIN ... ON` (condition correctness) |
 | 23 | Function | `ROUND` |
+| 24 | JOIN Pattern | Self-Join (table joined to itself) |
 
 ---
 
@@ -608,3 +609,24 @@ round(avg(stars)::numeric, 2) as avg_stars
 **What it can't do:**
 - **One argument is not a smaller version of two arguments — it's a different operation.** `ROUND(3.567)` gives `4` (whole number, all decimal information discarded); `ROUND(3.567, 2)` gives `3.57`. Omitting the second argument when a question specifically asks for N decimal places produces the wrong *shape* of answer, not just a formatting difference.
 - The two-argument form specifically wants a `numeric` first argument — calling it on a `double precision` value (e.g. an uncast `AVG()` result, depending on context) can resolve to the wrong overload or error; `::numeric` removes the ambiguity.
+
+---
+
+## 24. Self-Join — Same Table Referenced Twice
+
+**What it does:** An ordinary `JOIN` where both sides happen to be the *same* table, given two different aliases so each reference can play a different role. Used whenever a row needs to be compared against, or matched to, one other specific row of that same table — typically signaled by a foreign key that points back into its own table rather than out to a different one.
+
+**Form used so far:**
+```sql
+SELECT e.employee_id, e.name
+FROM employee e
+JOIN employee m ON e.manager_id = m.employee_id
+WHERE e.salary > m.salary;
+```
+`e` plays the role of "the employee," `m` plays the role of "the manager" — both are the exact same `employee` table underneath, distinguished only by alias. `ON e.manager_id = m.employee_id` matches each employee's own row to the specific row their `manager_id` foreign key points at (same PK/FK relationship as §-level Entry #4, just pointing back into its own table). See MASTER-GUIDE Entry #24.
+
+**Why the alias is mandatory here, not optional:** In every prior join in this project, the two sides were genuinely different tables, so an alias was a readability convenience — `orders.user_id` was already unambiguous even without one. Once the same table is referenced twice, the bare table name (`employee.employee_id`) becomes genuinely ambiguous — there are two candidate rows it could mean, and nothing else in the query disambiguates it. The alias is the only thing that makes each reference to the table individually addressable.
+
+**What it can't do:**
+- Doesn't substitute for a window function (`RANK`, `LAG`/`LEAD`, `OVER (PARTITION BY ...)`, not yet used in this project) — a self-join fetches one *specific* row matched by a key; a window function computes a value across a set of rows relative to each row's position in an order. Different mechanisms for different "compare this row to something else" questions.
+- `INNER JOIN` (the default) drops any row with no match on the other side — including rows where the foreign key column is `NULL`, since `NULL` never equals anything, even another `NULL`. That's correct when there's genuinely nothing to compare against (this entry's case — no manager, no manager's salary to compare); it's the wrong choice when an unmatched row still needs to appear in the output (Entry #17's `LEFT JOIN` anti-join case) — self-join and join-type (`INNER`/`LEFT`/etc.) are independent choices, not the same decision.

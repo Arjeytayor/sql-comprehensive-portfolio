@@ -42,6 +42,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 21 | First CTE since Entry #1; `COUNT(DISTINCT entity_id)` must wrap the *entity's own ID column*, never an attribute that merely looks unique in the sample data; a repeated ID across CTE rows isn't "more duplicate" | DataLemur — LinkedIn duplicate job listings, count of companies with duplicate postings | `GROUP BY` on N columns = one row per distinct N-tuple, `COUNT(*)` in that row = repeat count of that tuple in the source table; a CTE's carried-through column isn't guaranteed unique per row; `title`/`description` can coincidentally collide across unrelated companies, silently undercounting; primary key vs. foreign key, reapplied (Entry #4) — `company_id` is a FK in `job_listings` but still the correct entity-ID to `DISTINCT` on |
 | 22 | The `GROUP BY` granularity rule stated explicitly for the first time; a self-referencing JOIN condition silently becomes a cross join | Ace the Data Science Interview — Top 3 cities by completed trade orders | `GROUP BY` must contain *exactly* the non-aggregated `SELECT` columns and nothing more — every extra column re-splits rows that should collapse together; `ON table.col = table.col` (same table both sides) is always true, so every row matches every row; `COUNT(*)` vs `COUNT(column)` equivalence when no `NULL`s are possible; `RANK()` for tie-preserving "top N" vs `LIMIT`'s arbitrary cutoff (forward reference, not yet used in a submitted query) |
 | 23 | `GROUP BY` vs. a column also sitting inside the aggregate it's grouped alongside; grouping by a raw timestamp vs. `EXTRACT`; `ROUND`'s second argument; grouping by a `SELECT`-list alias | Ace the Data Science Interview — Average star rating by month and product | A column can't sit *inside* an aggregate and *in* `GROUP BY` at the same time without defeating the aggregation entirely; a `timestamp` column groups by the exact instant, not the calendar month, unless `EXTRACT` reduces it first; `ROUND(x, n)` — one argument silently rounds to a whole number, the second argument is what actually sets the decimal places; grouping by a `SELECT`-list alias is legal in Postgres (execution-order exception, ties back to Entry #12) |
+| 24 | First self-join — the same table referenced twice under two aliases to compare a row against one specific other row it points to; why aliases become mandatory, not optional, once a table appears twice | DataLemur — Well Paid Employees, employees who earn more than their direct manager | `JOIN` only needs two *table references*, not two *different* tables; `e.manager_id = m.employee_id` matches each employee's own row to their manager's row via the FK/PK relationship (Entry #4, reapplied); a window function can't fetch "one specific named other row" — that's a `JOIN`'s job, not a window function's; `INNER JOIN` silently drops rows with no match (including `NULL` FK values, which never equal anything) — here that's correct behavior, not a bug to work around (contrast with Entry #17) |
 
 ---
 
@@ -1708,4 +1709,92 @@ order by mth, product_id;
 - **Grouped by the raw `submit_date` timestamp instead of an `EXTRACT`-reduced month value** — first time this specific "aggregate at the wrong calendar granularity" mistake has shown up.
 - **Called `ROUND` with only one argument** when the question specified 2 decimal places — new mistake, distinct from any prior `ROUND` use (first time `ROUND` has been used at all in this project).
 - **`SELECT` column order didn't match the question's specified output order** — a presentation-discipline slip, not a logic bug, but still a repeat of the general "match output to what's asked" lesson from Entry #8 in a new concrete form.
+
+---
+
+## 24. First Self-Join — DataLemur: Well Paid Employees
+
+### The question
+Given `employee(employee_id, name, salary, department_id, manager_id)`, find every employee who earns **more than their direct manager**. Output the employee's ID and name.
+
+### Why this needs the technique it needs
+A manager isn't stored in some separate `manager` table with its own salary column — a manager is just another row of the *same* `employee` table, referenced by `manager_id`, which points back at some other row's `employee_id`. To compare "this employee's salary" against "their manager's salary," both salaries need to be sitting in the same row at the same time, ready for `WHERE` to compare them directly. But a single, un-joined scan of `employee` only ever gives you one row at a time — and that one row only has `manager_id`, a bare number, never the salary that number actually points to. There is no way to answer "does this employee out-earn their manager" while looking at only one row. The table has to be joined **to itself** — one copy standing in for the employee, a second copy standing in for whoever `manager_id` points to — before both salaries can ever land in the same row for `WHERE` to compare.
+
+### Real-world version of this same problem
+A company's HR system stores every staff member — regular employees and managers alike — in one single roster table, because a manager is still just an employee (usually with other people's `manager_id` pointing at them). If an auditor wants to flag anyone who out-earns their own boss, they can't just scan the roster once — they have to check each person's row, look up who their boss is by ID, go find *that* person's row elsewhere in the same roster, and only then compare the two salaries. That's not two different lists being cross-referenced — it's one list, looked up against itself, once per person.
+
+### The concept, explained from zero
+
+**`JOIN` needs two table *references*, not two different tables.** Every join used in this project so far has joined two genuinely different tables (`trades`/`users`, `orders`/`customers`). But nothing about `JOIN`'s mechanics actually requires that — it just needs two named things in `FROM`/`JOIN` to match rows between. Naming the *same* table twice, under two different aliases, is completely legal and is called a **self-join**.
+
+**Why the alias stops being optional the moment this happens:** Every join so far, aliases were a convenience — `orders o`, `customers c` — nice for readability, but `orders.user_id` still unambiguously meant "the `user_id` column of the `orders` table," because only one copy of `orders` existed in the query. In a self-join, `employee` is referenced *twice*. Writing `employee.employee_id` at that point is genuinely ambiguous — there are two candidate rows it could mean, and SQL has no way to guess which one. The alias isn't decoration anymore; it's the only thing that makes each reference to the table answerable at all. (Two people both named "Sarah" in the same room — "Sarah, what's your age?" has no single answer until each one has a distinguishing nickname.)
+
+**The `ON` condition, read literally:** `ON e.manager_id = m.employee_id` says: for each row playing the role of `e` (the employee), find the row playing the role of `m` (the manager) whose `employee_id` matches this employee's `manager_id`. This is the exact same foreign-key-to-primary-key relationship taught in Entry #4 — `manager_id` is a foreign key that happens to point back into the *same table* it lives in, rather than into a separate one.
+
+**Why a window function wasn't the right tool, even though the instinct ("compare one row to another") was correct:** A window function computes a value *across a set of rows, relative to each row's position* — `RANK()` needs an ordering; `LAG()`/`LEAD()` reach for whatever row happens to sit immediately before/after in a defined order. None of those fetch "the one specific row identified by this foreign key" — they don't do targeted lookups by key at all. A self-join does exactly a targeted lookup: "find the row where X equals this specific value," which is precisely what `manager_id` needing a matching `employee_id` calls for.
+
+**Why `INNER JOIN` quietly dropping some rows is *correct* here, not a bug:** Three rows in the sample data can't be matched at all — two employees (`manager_id = 9` and `manager_id = 11`) whose managers aren't present anywhere in this excerpt of the table, and three rows (`manager_id IS NULL`) belonging to people with no manager at all, since `NULL` never equals anything, even another `NULL`, in a join condition. `INNER JOIN` drops all of these automatically, with no extra `WHERE` needed — and that's exactly right, because there is no manager salary to compare against for any of them, so they can't possibly be evaluated for "earns more than their manager." Contrast with Entry #17, where `INNER JOIN` dropping unmatched rows was the *problem* (a zero-likes page needs to survive with no match) — here, the exact same behavior is the desired outcome.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **First instinct: reached for a window function** — "I'm thinking I'd need a window function since we want to compare one to another." Right instinct (some row-to-row comparison mechanism is needed), wrong tool (window functions don't do targeted key-based lookups; a join does).
+2. **First code attempt had no join at all:**
+   ```sql
+   SELECT name, employee_id
+   FROM employee
+   where manager_id is NULL
+   having salary > manager_id
+   ```
+   Multiple compounding bugs: `WHERE manager_id IS NULL` selects employees **without** a manager — the exact opposite group of who needs evaluating, since those are the people with no manager to be compared against in the first place. `HAVING salary > manager_id` compares a salary to a bare foreign-key ID number — two values that don't mean the same kind of thing at all — and does so with no `GROUP BY` or aggregate function present, misusing `HAVING`'s role entirely. Most fundamentally: with no join, no row has any access to another row's salary — the comparison this question needs is structurally impossible from a single un-joined table.
+3. **Guided to recognize, from a single row's contents alone, that Olivia Smith's row has no field anywhere containing her manager's salary** — only `manager_id = 8`, a number, not the salary it points to. This made the *need* for a second table reference concrete before any syntax was introduced.
+4. **Given the self-join skeleton with one blank (the `ON` condition) to fill** — got stuck on why an alias was required at all, initially treating `e.employee_id` as just a shorthand for `employee.employee_id`.
+5. **Alias necessity clarified via the two-Sarahs analogy** (two references to the same table are ambiguous without a distinguishing nickname), confirmed explicitly: `employee e` and `employee m` are the literal same table, referenced twice, distinguished only by role.
+6. **Final query adopted, submitted, confirmed correct on DataLemur.**
+7. **Closed with a self-assessment question** — "is there a way I could have passed this on my own?" — landed on the honest answer that the specific pattern (self-join) was genuinely new and hadn't been taught yet, but the surrounding pieces (aliasing, `JOIN ... ON`, `WHERE` comparisons) were all already held from prior sessions; the actionable gap was recognizing `manager_id` as a same-table FK (Entry #4's pattern) and knowing to search for "join a table to itself," rather than deriving the technique unaided.
+
+### A hand-trace through the actual sample data
+
+| employee_id | name | salary | manager_id |
+|---|---|---|---|
+| 1 | Emma Thompson | 3800 | 6 |
+| 2 | Daniel Rodriguez | 2230 | 7 |
+| 3 | Olivia Smith | 7000 | 8 |
+| 4 | Noah Johnson | 6800 | 9 |
+| 5 | Sophia Martinez | 1750 | 11 |
+| 6 | Liam Brown | 13000 | NULL |
+| 7 | Ava Garcia | 12500 | NULL |
+| 8 | William Davis | 6800 | NULL |
+
+Walking `ON e.manager_id = m.employee_id` row by row:
+- Emma (`manager_id=6`) → matches Liam Brown, salary `13000`. `3800 > 13000`? No.
+- Daniel (`manager_id=7`) → matches Ava Garcia, salary `12500`. `2230 > 12500`? No.
+- **Olivia (`manager_id=8`) → matches William Davis, salary `6800`. `7000 > 6800`? Yes — included.**
+- Noah (`manager_id=9`) → no `employee_id=9` exists in this data — no match, row dropped by `INNER JOIN`.
+- Sophia (`manager_id=11`) → no `employee_id=11` exists — dropped.
+- Liam, Ava, William (`manager_id IS NULL`) → `NULL` matches nothing — all three dropped.
+
+Only Olivia Smith survives the join and the `WHERE` check — exactly matching the question's stated expected output.
+
+### Full solution
+```sql
+SELECT e.employee_id, e.name
+FROM employee e
+JOIN employee m ON e.manager_id = m.employee_id
+WHERE e.salary > m.salary;
+```
+
+### The pattern to remember
+**A self-join is just an ordinary `JOIN` where both sides happen to be the same table, distinguished by two different aliases playing two different roles.** Reach for it whenever a row needs to be compared against, or matched to, one specific *other* row of the same table — most often signaled by a foreign key that points back into its own table (`manager_id → employee_id`, an `employee` pointing at another `employee`) rather than out to a separate one. Once a table is referenced twice, aliases stop being a readability nicety and become mandatory — every column reference needs one to stay unambiguous.
+
+### Best practices / general approach — if you see this kind of question again
+- **A foreign key pointing back into its own table (not a different one) is the signal for a self-join** — `manager_id` referencing `employee_id` in the same `employee` table, an org chart's `parent_id` referencing its own `id`, etc.
+- **Before choosing a technique, ask what the question needs, mechanically:** a value compared against *one specific other row* → self-join; a value compared *within an ordered/partitioned set* (rank, running total, previous/next row) → window function. Both answer "compare this row to something else," but by fundamentally different mechanisms.
+- **The moment a table is referenced twice in one query, every column reference needs a table alias** — this isn't optional styling once ambiguity is possible, unlike earlier single-reference joins where aliases were just convenient.
+- **`INNER JOIN` dropping unmatched rows isn't automatically a bug** — check whether the question actually needs those unmatched rows represented (Entry #17's anti-join case) or whether it's correct for them to disappear because there's genuinely nothing to compare them against (this entry's case).
+
+### Mistakes made this time (new ones, not repeats)
+- **Guessed "window function" for a task that needed a targeted key-based lookup** — a new mistake shape: correct high-level instinct (some cross-row comparison is needed), wrong specific mechanism.
+- **Wrote a query with no join at all**, attempting the comparison from a single un-joined table scan — structurally impossible for this question, not just a syntax slip.
+- **`WHERE manager_id IS NULL` selected the exact opposite group** of who the question needed evaluated (people with no manager, instead of people who have one to be compared against).
+- **`HAVING salary > manager_id`** compared two values of fundamentally different kinds (a salary and a foreign-key ID) and used `HAVING` with no `GROUP BY`/aggregate present — a new misuse of `HAVING`, distinct from any prior `HAVING` mistake in this project.
+- **Treated an alias as interchangeable with the bare table name** (`e.employee_id` assumed equivalent to `employee.employee_id`) — first time this specific misunderstanding has surfaced, only became visible once a table was referenced twice in the same query.
 

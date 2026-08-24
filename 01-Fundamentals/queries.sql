@@ -240,3 +240,10 @@ SELECT extract(MONTH from submit_date) as mth,
 from reviews
 group by product_id, mth
 order by mth, product_id;
+
+-- DataLemur (not Chinook) — employee(employee_id, name, salary, department_id, manager_id)
+-- Well Paid Employees: employees who earn more than their direct manager (first self-join)
+SELECT e.employee_id, e.name
+FROM employee e
+JOIN employee m ON e.manager_id = m.employee_id
+WHERE e.salary > m.salary;
