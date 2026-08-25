@@ -247,3 +247,8 @@ SELECT e.employee_id, e.name
 FROM employee e
 JOIN employee m ON e.manager_id = m.employee_id
 WHERE e.salary > m.salary;
+
+
+select composer is null as is_missing, count(*)
+from track
+group by composer is null;
