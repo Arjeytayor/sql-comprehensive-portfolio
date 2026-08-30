@@ -252,3 +252,20 @@ WHERE e.salary > m.salary;
 select composer is null as is_missing, count(*)
 from track
 group by composer is null;
+
+SELECT track.name, track.genre_id
+FROM track
+FULL JOIN genre ON track.genre_id = genre.genre_id
+WHERE genre.name IS NULL
+   OR track.name IS NULL;
+
+SELECT track.name, track.track_id
+FROM playlist
+FULL JOIN playlist_track ON playlist.playlist_id = playlist_track.playlist_id
+FULL JOIN track ON track.track_id = playlist_track.track_id
+WHERE playlist_track.playlist_id IS NULL
+   OR playlist_track.track_id IS NULL;
+
+select billing_country from invoice
+  except
+  select country from customer

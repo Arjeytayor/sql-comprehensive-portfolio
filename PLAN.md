@@ -21,9 +21,9 @@
 **CTA (do this now):** Get PostgreSQL installed and Chinook loaded today — everything else depends on having a live local database to query against.
 
 **KPIs**
-- [ ] `SELECT version();` returns a result in VS Code via SQLTools
-- [ ] Chinook tables visible locally (11 tables, e.g. `Track`, `Invoice`, `Customer`)
-- [ ] GitHub repo created with empty module folders
+- [x] `SELECT version();` returns a result in VS Code via SQLTools
+- [x] Chinook tables visible locally (11 tables, e.g. `Track`, `Invoice`, `Customer`)
+- [x] GitHub repo created with empty module folders
 - [ ] DataLemur profile created
 
 ---
