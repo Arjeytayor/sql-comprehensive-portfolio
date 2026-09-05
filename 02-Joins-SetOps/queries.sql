@@ -53,3 +53,23 @@ WHERE genre.name IS NULL
 SELECT billing_country FROM invoice
 EXCEPT
 SELECT country FROM customer;
+
+-- UNION: every distinct country that's either a customer's country or an
+-- invoice's billing country, deduplicated. Returned 24 rows.
+SELECT customer.country FROM customer
+UNION
+SELECT invoice.billing_country FROM invoice;
+
+-- INTERSECT: countries that are both a customer's country AND an invoice's
+-- billing country. Also returned the same 24 rows as the UNION above —
+-- expected, since the EXCEPT query proved neither set has anything the
+-- other lacks (0 rows both directions), meaning the two sets are identical.
+SELECT customer.country FROM customer
+INTERSECT
+SELECT invoice.billing_country FROM invoice;
+
+-- CROSS JOIN: Cartesian product, every playlist paired with every genre,
+-- no relationship or ON clause needed. 18 playlists x 25 genres = 450 rows,
+-- confirmed by the actual result (predicted correctly before running).
+SELECT playlist_id FROM playlist
+CROSS JOIN genre;
