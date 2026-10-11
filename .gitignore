@@ -1,3 +1,6 @@
 *.csv
 *.env
 .vscode/settings.json
+
+# Private session notes, never published
+HANDOFF.md
