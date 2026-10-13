@@ -73,3 +73,15 @@ SELECT invoice.billing_country FROM invoice;
 -- confirmed by the actual result (predicted correctly before running).
 SELECT playlist_id FROM playlist
 CROSS JOIN genre;
+
+
+-- SCALAR SUBQUERY: tracks longer than the average track length.
+-- `WHERE milliseconds > AVG(milliseconds)` fails ("aggregate functions are
+-- not allowed in WHERE"): WHERE checks one row at a time, AVG needs all rows.
+-- The subquery runs on its own over every row first, returns one value
+-- (~393599 ms), and WHERE compares each row against it. Beats hard-coding
+-- that number, which would silently go stale if tracks were added.
+select name,milliseconds from track
+where milliseconds > (SELECT AVG(milliseconds) from track);
+
+select AVG(milliseconds) from track;
