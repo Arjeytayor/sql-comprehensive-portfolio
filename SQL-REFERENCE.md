@@ -34,6 +34,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 22 | Clause | `JOIN ... ON` (condition correctness) |
 | 23 | Function | `ROUND` |
 | 24 | JOIN Pattern | Self-Join (table joined to itself) |
+| 25 | Subquery | Scalar subquery `(SELECT one_value ...)` |
 
 ---
 
@@ -289,10 +290,14 @@ from companies_dup   -- a CTE that may list the same company on more than one ro
 ```
 The column inside `DISTINCT` must be the ID column of the real-world *entity* the question is asking to count — not any column that merely looks unique in the sample data you're staring at. A `title` or `description` column can coincidentally repeat across two unrelated entities (two different companies both posting a "Business Analyst" listing), silently collapsing a correct count of 2 down to a wrong count of 1. `DISTINCT` is also still required even on a column that *does* correctly identify the entity, because that entity's ID can legitimately repeat across multiple rows for reasons that have nothing to do with the count being asked for (one company appearing on two separate rows of a CTE because it duplicated two different job listings, not because it's "more duplicate"). See MASTER-GUIDE Entry #21.
 
-**Other forms it supports (not yet used here):**
-- `COUNT(column)` on a genuine table column (not a `CASE` expression) — count of non-`NULL` values in that column.
+**`COUNT(column)` after a `LEFT JOIN` — giving unmatched rows 0, now used:**
+```sql
+count(distinct queries.query_id) as unique_queries   -- grouped by employees.employee_id
+```
+After a `LEFT JOIN`, an anchor row with no match still exists as one row, with every right-hand column `NULL`. `COUNT(*)` counts that row → **1** (wrong). `COUNT(right_table.column)` skips the `NULL` → **0** (right). This is what makes a "0" bucket possible. `DISTINCT` here only matters if the column can repeat — `query_id` is a primary key, so plain `COUNT(queries.query_id)` gives the same result. See MASTER-GUIDE Entry #26.
 
 **What it can't do:**
+- `COUNT(*)` can't tell a real matched row from a `LEFT JOIN`'s all-`NULL` placeholder row — both count as 1.
 - `COUNT(alias)` doesn't work if `alias` isn't a real column — Postgres looks for an actual column by that name and errors if it's just something invented earlier in the same `SELECT` list (see MASTER-GUIDE Entry #12).
 - Like any aggregate, only meaningful alongside `GROUP BY` when you want a count *per group* — without `GROUP BY`, `COUNT(*)` collapses the whole table into a single number.
 
@@ -434,6 +439,17 @@ Keeps every page, including ones with zero rows in `page_likes` (those rows come
 - `RIGHT JOIN` — mirror image, keeps every row from the right-hand table instead.
 - `FULL OUTER JOIN` — keeps unmatched rows from *both* sides at once.
 - Can be used for its normal purpose too (just "attach optional related data, keep the anchor row either way"), not only for the anti-join `IS NULL` pattern.
+
+**Filter conditions inside `ON` — keeping the zero rows, now used:**
+```sql
+from employees
+left join queries
+  on employees.employee_id = queries.employee_id
+  and extract(month from queries.query_starttime) in (7, 8, 9)
+  and extract(year from queries.query_starttime) = 2023
+group by employees.employee_id
+```
+`ON` accepts any true/false conditions, not just key equality — a pair matches only if all of them are true. Conditions in `ON` filter the **right-hand rows during the join**; the anchor row is still kept (with `NULL`s) if none of its matches qualify. The same condition in `WHERE` runs **after** the join: an unmatched row's right-hand columns are `NULL`, `NULL = 2023` isn't true, so `WHERE` drops the anchor row entirely — silently turning the `LEFT JOIN` back into an `INNER JOIN`. Rule: with a `LEFT JOIN`, filters on the right-hand table go in `ON`. Also group by the **anchor's** key, never the right-hand key (it's `NULL` for every unmatched row, lumping them into one group). See MASTER-GUIDE Entry #26.
 
 **What it can't do:**
 - Doesn't automatically isolate the unmatched rows — that always requires an explicit `WHERE <right_table>.<column> IS NULL` afterward. `LEFT JOIN` alone returns matched *and* unmatched rows mixed together.
@@ -630,3 +646,29 @@ WHERE e.salary > m.salary;
 **What it can't do:**
 - Doesn't substitute for a window function (`RANK`, `LAG`/`LEAD`, `OVER (PARTITION BY ...)`, not yet used in this project) — a self-join fetches one *specific* row matched by a key; a window function computes a value across a set of rows relative to each row's position in an order. Different mechanisms for different "compare this row to something else" questions.
 - `INNER JOIN` (the default) drops any row with no match on the other side — including rows where the foreign key column is `NULL`, since `NULL` never equals anything, even another `NULL`. That's correct when there's genuinely nothing to compare against (this entry's case — no manager, no manager's salary to compare); it's the wrong choice when an unmatched row still needs to appear in the output (Entry #17's `LEFT JOIN` anti-join case) — self-join and join-type (`INNER`/`LEFT`/etc.) are independent choices, not the same decision.
+
+---
+
+## 25. Scalar Subquery — `(SELECT one_value ...)`
+
+**What it does:** A complete query wrapped in parentheses and placed where a single value would go. The inner query runs first, on its own, over all its rows, and returns exactly one value (one row, one column); that value takes the parentheses' place and the outer query runs as if the number had been typed in.
+
+**Form used so far:**
+```sql
+select name, milliseconds from track
+where milliseconds > (SELECT AVG(milliseconds) from track);
+```
+Compares each track's length against the average of all tracks. See MASTER-GUIDE Entry #25.
+
+**Why it's needed here:** `WHERE` checks one row at a time, so `WHERE milliseconds > AVG(milliseconds)` errors (*"aggregate functions are not allowed in WHERE"*). The subquery has its own `FROM`, sees every row, computes the aggregate, and hands `WHERE` a finished value. It also recalculates on every run — unlike hard-coding the number, which goes stale silently when the data changes.
+
+**Other forms it supports (not yet used here):**
+- In `SELECT`: `select name, milliseconds, (select avg(milliseconds) from track) as avg_ms from track` — shows the overall figure next to every row.
+- In `HAVING`: compare a group's aggregate against a whole-table aggregate.
+- List subquery: `WHERE col IN (SELECT col FROM ...)` — returns many values, used with `IN` (next to practice).
+- Correlated subquery: the inner query references the outer row (e.g. average *of the same genre*) and reruns once per outer row.
+
+**What it can't do:**
+- Must return **one** value when used with `=`, `>`, `<` etc. — if the inner query returns several rows, Postgres errors (*"more than one row returned by a subquery used as an expression"*); use `IN` instead.
+- Can't be written without parentheses — a bare `SELECT` after `>` is a syntax error.
+- The inner query's `;` can't go inside the brackets — only one `;`, at the very end of the whole statement.

@@ -43,6 +43,8 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 22 | The `GROUP BY` granularity rule stated explicitly for the first time; a self-referencing JOIN condition silently becomes a cross join | Ace the Data Science Interview — Top 3 cities by completed trade orders | `GROUP BY` must contain *exactly* the non-aggregated `SELECT` columns and nothing more — every extra column re-splits rows that should collapse together; `ON table.col = table.col` (same table both sides) is always true, so every row matches every row; `COUNT(*)` vs `COUNT(column)` equivalence when no `NULL`s are possible; `RANK()` for tie-preserving "top N" vs `LIMIT`'s arbitrary cutoff (forward reference, not yet used in a submitted query) |
 | 23 | `GROUP BY` vs. a column also sitting inside the aggregate it's grouped alongside; grouping by a raw timestamp vs. `EXTRACT`; `ROUND`'s second argument; grouping by a `SELECT`-list alias | Ace the Data Science Interview — Average star rating by month and product | A column can't sit *inside* an aggregate and *in* `GROUP BY` at the same time without defeating the aggregation entirely; a `timestamp` column groups by the exact instant, not the calendar month, unless `EXTRACT` reduces it first; `ROUND(x, n)` — one argument silently rounds to a whole number, the second argument is what actually sets the decimal places; grouping by a `SELECT`-list alias is legal in Postgres (execution-order exception, ties back to Entry #12) |
 | 24 | First self-join — the same table referenced twice under two aliases to compare a row against one specific other row it points to; why aliases become mandatory, not optional, once a table appears twice | DataLemur — Well Paid Employees, employees who earn more than their direct manager | `JOIN` only needs two *table references*, not two *different* tables; `e.manager_id = m.employee_id` matches each employee's own row to their manager's row via the FK/PK relationship (Entry #4, reapplied); a window function can't fetch "one specific named other row" — that's a `JOIN`'s job, not a window function's; `INNER JOIN` silently drops rows with no match (including `NULL` FK values, which never equal anything) — here that's correct behavior, not a bug to work around (contrast with Entry #17) |
+| 25 | First scalar subquery — why `WHERE` can't hold an aggregate; why hard-coding the computed value goes stale | Chinook — Tracks longer than average length | A query inside `( )` runs first over all rows and returns one value for the outer `WHERE` to compare against; parentheses are mandatory; recompute, never hard-code |
+| 26 | Histogram with a zero bucket; filter in `ON` vs `WHERE` on a `LEFT JOIN`; `COUNT(*)` vs `COUNT(column)` vs `COUNT(DISTINCT column)` | DataLemur — IBM db2 Product Analytics | Anchor on the full list and `LEFT JOIN` activity with its filters in `ON` (a `WHERE` on the right table drops the zero rows); group by the anchor's key; `COUNT(column)` gives unmatched rows 0, `COUNT(*)` gives 1; CTE + outer `GROUP BY` the count (Entry #1 shape) |
 
 ---
 
@@ -1798,3 +1800,157 @@ WHERE e.salary > m.salary;
 - **`HAVING salary > manager_id`** compared two values of fundamentally different kinds (a salary and a foreign-key ID) and used `HAVING` with no `GROUP BY`/aggregate present — a new misuse of `HAVING`, distinct from any prior `HAVING` mistake in this project.
 - **Treated an alias as interchangeable with the bare table name** (`e.employee_id` assumed equivalent to `employee.employee_id`) — first time this specific misunderstanding has surfaced, only became visible once a table was referenced twice in the same query.
 
+---
+
+## 25. First Scalar Subquery — Why `WHERE` Can't Hold an Aggregate, and Why Hard-Coding the Answer Goes Stale — Chinook: Tracks Longer Than Average
+
+### The question
+List every track (name + length) that is longer than the average track length. Length lives in `track.milliseconds`.
+
+### Why this needs the technique it needs
+The comparison needs two different kinds of number at the same moment: each track's *own* length (a one-row fact) and the *average* length (an all-rows fact). `WHERE` only ever looks at one row at a time, so it has no way to compute an average across all rows while it's in the middle of checking one row. Writing `WHERE milliseconds > AVG(milliseconds)` fails outright: *"aggregate functions are not allowed in WHERE."* The average has to be computed **separately, first**, by a query that does see every row — and then handed to `WHERE` as a finished single value. That separate inner query is a **subquery**.
+
+### Real-world version of this same problem
+A teacher wants to list every student who scored above the class average. She can't decide "above average?" while looking at one student's paper — she first has to add up every paper and divide, get one number (say 64), and only then go back through the papers one by one asking "is this one above 64?" If she writes "64" on a sticky note and reuses it next term, it's wrong the moment a new class sits the test. The reliable method is "recompute the class average every time, then compare" — which is exactly what a subquery does. (Same shape later in the capstone: "customers who spend more than the average customer.")
+
+### The concept, explained from zero
+
+**A subquery is a complete query placed inside another query, wrapped in parentheses.** SQL runs the inner one first, takes its result, and drops it into the spot where the parentheses were — exactly like brackets in maths: in `2 × (3 + 4)`, the bracket is worked out first and its result (7) takes its place.
+
+**A scalar subquery returns exactly one value** — one row, one column. That's what makes it legal on the right-hand side of `>`: after it runs, `WHERE` just sees `milliseconds > 393599.21…`, a plain comparison.
+
+**Why the aggregate is legal inside the subquery but not in the outer `WHERE`:** the subquery is its own separate query with its own `FROM track`. It runs over *all* rows of `track` on its own, finishes, and hands back one number. The outer `WHERE` never computes the average — it only receives it.
+
+**Why the parentheses are mandatory:** after `>`, Postgres expects a *value*. A bare `SELECT ...` there is a keyword that starts a new statement, and the parser can't tell where the inner query ends and the outer one resumes. Parentheses seal the inner query into one unit.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **First attempt went straight for the direct version:** `select milliseconds from track where milliseconds > avg(milliseconds);` → error *"aggregate functions are not allowed in WHERE."*
+2. **Said "I don't know how to go about it"** — so the problem was broken into tiny steps.
+3. **Fixed `SELECT` to say which track** — bare lengths can't tell you *which* tracks qualify; added `name` (typo `nsme` en route).
+4. **Wrote the average on its own, as a separate query:** `select AVG(milliseconds) from track;` → `393599.212103910933`. (Pasted it mid-way through the first query at first, splitting `SELECT`/`FROM` from its `WHERE` — moved it out to stand alone.)
+5. **Hard-coded that number into `WHERE`** → worked, long list returned (TV episodes at 40+ minutes sit at the bottom).
+6. **Asked: what happens if 500 short songs are added tomorrow?** → correctly reasoned the real average drops but the typed-in number doesn't, so the hard-coded version silently returns the wrong tracks.
+7. **Replaced the number with the average query** — first try without parentheses (`> select AVG(...) from track`) → error. Compared against the `( )` shape, added them → ran, same list.
+8. **Asked "why does it work now?"** (invited explanation). Restate took two nudges: "it looks at the whole of the row" meant *all the rows* — wording corrected. Also took "it refreshes with every update" as *the* reason — corrected that it's the second reason; the first is that `WHERE` can't compute an aggregate at all.
+
+### A hand-trace through actual data
+- Inner query runs first over every track → `393599.21`.
+- Outer query, row by row:
+  - "Master Of Puppets", `436453` → `436453 > 393599.21`? Yes — kept.
+  - "Wicked Ways", `393691` → only just above — kept.
+  - A typical 3–4 minute song (~`210000`) → No — dropped.
+  - "Occupation / Precipice" (a TV episode), `5286953` → Yes — kept.
+
+### Full solution
+```sql
+select name, milliseconds from track
+where milliseconds > (SELECT AVG(milliseconds) from track);
+```
+
+### The pattern to remember
+**Compare each row against a value computed from many rows → put that value's query inside `( )` where the value would go.** The inner query runs first, over all rows, and returns one value; the outer `WHERE` compares each row against it.
+
+### Best practices / general approach
+- **Trigger words:** "above/below average," "more than the overall total," "the latest date," "the highest price" — any per-row comparison against a whole-table figure.
+- **Build it in two steps:** write the inner query alone and run it first (check it returns *one* value), then paste it into the outer query inside parentheses.
+- **Never hard-code a number SQL can compute** — it goes stale silently, with no error.
+- **Common mistakes:** aggregate directly in `WHERE`; forgetting the parentheses; leaving the inner query's `;` inside the brackets.
+- **Variant twists coming next:** a subquery that returns a *list* (used with `IN`), and a *correlated* subquery that reruns once per outer row (e.g. "longer than the average **of its own genre**").
+
+---
+
+## 26. Histogram With a Zero Bucket — `LEFT JOIN` + `COUNT(column)` Inside a CTE, and Why the Date Filter Goes in `ON`, Not `WHERE` — DataLemur: IBM db2 Product Analytics
+
+### The question
+`queries(employee_id, query_id, query_starttime, execution_time)` and `employees(employee_id, full_name, gender)`. Build histogram data: for Q3 2023 (July–September), how many employees ran 0 unique queries, how many ran 1, 2, and so on. Output `unique_queries`, `employee_count`.
+
+### Why this needs the technique it needs
+Three separate things break without the right tool:
+1. **Two levels of counting.** "How many employees ran 2 queries" can only be answered after you know how many each employee ran. Per-employee counts first, then counting employees per count → a CTE (same shape as Entry #1's Twitter histogram).
+2. **The 0 bucket.** Employees who ran nothing have **no rows at all** in `queries`. An `INNER JOIN` drops them; they only survive a `LEFT JOIN` anchored on `employees` (Entry #17's idea).
+3. **The date filter.** Putting the Q3 2023 condition in `WHERE` checks it *after* the join — and a zero-query employee's `query_starttime` is `NULL`, so the condition isn't true, and `WHERE` drops them. The 0 bucket silently vanishes. The filter must go in the `ON` clause.
+
+### Real-world version of this same problem
+A gym manager wants a chart: "how many members came 0 times this quarter, 1 time, 2 times…". The visit log only has rows for people who came — members who never showed up aren't in it at all. So she starts from the **member list**, attaches each member's visits *for this quarter only*, counts visits per member (non-visitors get 0), then counts members per visit-count. If she first filtered the *combined* list to "visits this quarter," every member with no visit row would be thrown out — exactly the people she most needs to see. (Same shape as RFM "frequency" buckets in the capstone.)
+
+### The concept, explained from zero
+
+**`COUNT(*)` vs `COUNT(column)` vs `COUNT(DISTINCT column)`:**
+- `COUNT(*)` counts **rows**. After a `LEFT JOIN`, a non-runner still has one row (their employee data + `NULL`s), so they get **1** — wrong.
+- `COUNT(queries.query_id)` counts **non-`NULL` values** in that column. The non-runner's `query_id` is `NULL`, so they get **0** — right.
+- `COUNT(DISTINCT queries.query_id)` counts **unique** non-`NULL` values. Here `query_id` is the primary key, so it never repeats and this equals plain `COUNT(column)`; `DISTINCT` just matches the word "unique" and guards against duplicates.
+
+**Why `ON a.id = b.id` doesn't mean the two columns are always equal:** they're equal only in rows where a match was found. For an unmatched `LEFT JOIN` row, the left side keeps its value and *every* right-side column is filled with `NULL`. So `employees.employee_id` is always populated; `queries.employee_id` is `NULL` for non-runners — grouping by it would lump every non-runner into one `NULL` group.
+
+**Filtering in `ON` vs `WHERE` with a `LEFT JOIN`:**
+- `ON` holds *any* true/false conditions, not only ID matches. A pair (employee + query) counts as a match only if every condition is true.
+- **`ON` filters during the join** — it removes non-qualifying *queries*, but the `LEFT JOIN` still keeps every employee (filling `NULL` if none of their queries qualified).
+- **`WHERE` filters after the join** — it can throw away whole *employees*, because a `NULL` date never satisfies `= 2023`.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **Planned before coding** — matched the shape to Entry #1 (histogram, CTE) + Entry #17 (zero bucket, `LEFT JOIN`).
+2. **Anchor table:** `employee` → corrected to `employees` (schema name). Right instinct: the table that holds *everyone*.
+3. **Join type took three tries:** `INNER` (drops non-runners — tested against employee #3, who ran nothing), then `RIGHT` (keeps the wrong side — same slip as 2026-08-30), then `LEFT`.
+4. **`ON employee_id`** → needs a comparison: `employees.employee_id = queries.employee_id` (typo `employye` fixed).
+5. **First-level `GROUP BY` was the hardest part:** suggested `group by count(queries)` (can't group by an aggregate), then "each query" (tested: employee 226 with 3 queries needs *one* row, not three), then `queries.employee_id`. Asked the key question: *"emp.emp_id = qu.emp_id has been joined — isn't it the same?"* — shown that unmatched rows have `NULL` on the `queries` side; landed on `employees.employee_id`.
+6. **Count choice:** asked for `COUNT(*)` vs `COUNT(DISTINCT)` vs `COUNT(column)` to be explained (invited); restated correctly — "`COUNT(*)` counts an empty row as 1, `COUNT(column)` records it as 0."
+7. **Date condition:** had forgotten `EXTRACT`, then wrote `is 7,8,9` / `is 2023` — `IS` is only for `NULL`/booleans; fixed to `IN (7, 8, 9)` and `= 2023`. Briefly said "June–September" — corrected to July (7).
+8. **Placement trap:** stated the `WHERE` rule correctly ("keeps if true, drops if false") and applied it: non-runners get dropped. Moved the filter into `ON` — asked "so you're joining and extracting at the same time?" — then correctly traced employee A (only May 2023 queries): no query passes `ON`, still kept by `LEFT JOIN`, count 0.
+9. **Outer query:** first `select employee_id, unique_queries` (just reprints step 1); then `SELECT` right but `group by employee_id`; asked what employees 3, 1, 2 share → "they have zero in common" → `group by unique_queries`.
+10. **Asked for the pieces to be assembled** into the CTE; submitted — **correct on first submit.**
+
+### A hand-trace through sample data
+(The two sample excerpts don't share any employee IDs, so this traces an illustrative mix.)
+
+After `employees LEFT JOIN queries ON id match AND Q3 2023`:
+
+| employees.employee_id | queries.employee_id | query_id | note |
+|---|---|---|---|
+| 226 | 226 | 856987 | July 2023 |
+| 226 | 226 | 286115 | Aug 2023 |
+| 226 | 226 | 33683 | Sep 2023 |
+| 132 | 132 | 413477 | July 2023 |
+| 3 | NULL | NULL | ran nothing |
+| A | NULL | NULL | only ran in May — failed `ON` |
+
+Step 1 (`GROUP BY employees.employee_id`, `COUNT(DISTINCT query_id)`): 226 → 3, 132 → 1, 3 → 0, A → 0.
+
+Step 2 (`GROUP BY unique_queries`, `COUNT(employee_id)`): 0 → 2, 1 → 1, 3 → 1.
+
+With the filter in `WHERE` instead: employees 3 and A are dropped → the 0 row disappears. With `COUNT(*)` instead: 3 and A each get 1 → the 0 row disappears and the 1 bucket is inflated.
+
+### Full solution
+```sql
+with emp_counts as (
+    select employees.employee_id,
+           count(distinct queries.query_id) as unique_queries
+    from employees
+    left join queries
+      on employees.employee_id = queries.employee_id
+      and extract(month from queries.query_starttime) in (7, 8, 9)
+      and extract(year from queries.query_starttime) = 2023
+    group by employees.employee_id
+)
+select unique_queries, count(employee_id) as employee_count
+from emp_counts
+group by unique_queries
+order by unique_queries;
+```
+
+### The pattern to remember
+**Histogram including zeros:** anchor `FROM` on the table of *everyone* → `LEFT JOIN` the activity table, with **all activity filters in `ON`** → `GROUP BY` the anchor's ID, `COUNT(activity_column)` (never `COUNT(*)`) → wrap in a CTE → outer `GROUP BY` the count, `COUNT` the entities.
+
+### Best practices / general approach
+- **Before every `GROUP BY`, say "one output row = one ___."** Step 1: one row = one employee. Step 2: one row = one bucket. `GROUP BY` names whatever fills the blank; `SELECT` should match it.
+- **Trigger words for the zero bucket:** "including those who did not," "0 purchases," "never logged in" → `LEFT JOIN` from the full list.
+- **With a `LEFT JOIN`, conditions on the right-hand table go in `ON`**; conditions on the left (anchor) table can go in `WHERE`.
+- **After a `LEFT JOIN`, group by the anchor table's key** — the right-hand key is `NULL` for unmatched rows.
+- **`COUNT(*)` after a `LEFT JOIN` gives 1, not 0, to unmatched rows** — count a right-hand column instead.
+- **`IS` is only for `NULL`/`TRUE`/`FALSE`** — numbers use `=`, lists use `IN`.
+
+### Mistakes made this time
+- `INNER` → `RIGHT` → `LEFT`: join-type selection still not automatic (repeat of 2026-08-30's `RIGHT JOIN` slip).
+- Tried to `GROUP BY` an aggregate, then by "each query," then by the right-hand table's key — the "one row = one ___" gap (diagnosed 2026-08-24) is still the main blocker.
+- `IS 7,8,9` / `IS 2023` — `IS` used for value comparison (repeat of Entry #7's `IS` confusion).
+- Forgot `EXTRACT` and `IN` after the 5-week gap — recall decay, not misunderstanding.
+- Outer query initially selected `employee_id` — reprinting step 1 instead of bucketing.

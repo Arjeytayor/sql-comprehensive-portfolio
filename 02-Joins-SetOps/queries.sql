@@ -85,3 +85,4 @@ select name,milliseconds from track
 where milliseconds > (SELECT AVG(milliseconds) from track);
 
 select AVG(milliseconds) from track;
+
