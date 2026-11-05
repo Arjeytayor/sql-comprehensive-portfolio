@@ -35,6 +35,7 @@ New sections get added only after a concept has actually been practiced in a rea
 | 23 | Function | `ROUND` |
 | 24 | JOIN Pattern | Self-Join (table joined to itself) |
 | 25 | Subquery | Scalar subquery `(SELECT one_value ...)` |
+| 26 | Operator | `/` division — integer vs decimal (`100.0`) |
 
 ---
 
@@ -81,6 +82,12 @@ Same result as the `COALESCE` version above — `CASE WHEN` is the longhand way 
 **What it can't do:**
 - Every `CASE` needs its own `END` — you cannot chain the alias onto the last `THEN`/`ELSE` value directly; forgetting `END` before `AS alias` is a syntax error (caught in Entry #6 of MASTER-GUIDE).
 - Can't carry an alias across separate `SELECT` statements — the alias only exists inside the same statement it's defined in.
+
+**Addendum — `CASE WHEN` inside `SUM` (MASTER-GUIDE Entry #27):** the `CASE` runs once per row and decides what that row is worth; `SUM` adds those values across the group.
+- **1/0 flag → a conditional count:** `sum(case when event_type = 'click' then 1 else 0 end)` counts only clicks. For two counts in the same row, write one `SUM(CASE ...)` per count. One `CASE` can't produce both.
+- **Signed amount → a net total:** `SUM(CASE WHEN transaction_type = 'Deposit' THEN amount WHEN transaction_type = 'Withdrawal' THEN -amount ELSE 0 END)` gives a final balance (PayPal question).
+- Must sit *inside* the aggregate. On its own, a `CASE` would have to check a single row's value for a group that has many.
+- String comparisons inside `WHEN` are case-sensitive and need single quotes: `'click'` ≠ `'Click'`, and `"click"` means a column name.
 
 ---
 
@@ -625,6 +632,7 @@ round(avg(stars)::numeric, 2) as avg_stars
 **What it can't do:**
 - **One argument is not a smaller version of two arguments — it's a different operation.** `ROUND(3.567)` gives `4` (whole number, all decimal information discarded); `ROUND(3.567, 2)` gives `3.57`. Omitting the second argument when a question specifically asks for N decimal places produces the wrong *shape* of answer, not just a formatting difference.
 - The two-argument form specifically wants a `numeric` first argument — calling it on a `double precision` value (e.g. an uncast `AVG()` result, depending on context) can resolve to the wrong overload or error; `::numeric` removes the ambiguity.
+- **Can't bring back decimals that are already gone.** `ROUND(100 * 2 / 3, 2)` gives `66.00`, not `66.67`: the integer division (§26) had already chopped the number to 66, and `ROUND` only formats it with two zeros. The decimal has to be kept *before* `ROUND` runs (`100.0 * ...`). Seen in MASTER-GUIDE Entry #27.
 
 ---
 
@@ -672,3 +680,29 @@ Compares each track's length against the average of all tracks. See MASTER-GUIDE
 - Must return **one** value when used with `=`, `>`, `<` etc. — if the inner query returns several rows, Postgres errors (*"more than one row returned by a subquery used as an expression"*); use `IN` instead.
 - Can't be written without parentheses — a bare `SELECT` after `>` is a syntax error.
 - The inner query's `;` can't go inside the brackets — only one `;`, at the very end of the whole statement.
+
+---
+
+## 26. `/` — Division Operator (integer vs decimal)
+
+**What it does:** Divides one number by another. The **type** of the result follows the types going in: integer ÷ integer gives an integer, with the decimal part **chopped off (truncated), not rounded**. If either side is a decimal (`numeric`, e.g. `100.0`), the result keeps its decimals.
+
+**Form used so far:**
+```sql
+round(100.0* sum(case when event_type = 'click' then 1 else 0 end)/
+sum(case when event_type = 'impression' then 1 else 0 end),2) as ctr
+```
+Both `SUM`s are integers. Writing `100.0` at the front makes the left side decimal *before* the division runs (SQL evaluates `*` and `/` left to right), so the division keeps its decimals. See MASTER-GUIDE Entry #27.
+
+**Tested side by side on DataLemur's data:**
+- `100.0 * ...` → `33.33`, `66.67`
+- `100 * ...` → `33.00`, `66.00` (66.67 chopped to 66, not rounded to 67; the `.00` is just `ROUND(..., 2)` formatting a whole number)
+
+**Other forms (not yet used here):**
+- Cast instead of `100.0`: `sum(...)::numeric / sum(...)` (§18).
+- `x * 1.0 / y` when no percentage is wanted.
+
+**What it can't do:**
+- **Order matters.** `100.0 * a / b` is decimal from the start. `a / b * 100.0` does the integer division *first*: `1 / 3 = 0`, then `0 * 100.0 = 0.0`. The `100.0` arrives too late to help.
+- **It doesn't warn you.** Integer division is valid SQL, and when the numbers divide evenly (`100 / 2 = 50`) the bug is invisible. It only shows up with a remainder.
+- Dividing by zero errors (*"division by zero"*). If a group can have 0 in the denominator, guard it with `NULLIF(denominator, 0)` (not yet used here).

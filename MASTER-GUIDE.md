@@ -45,6 +45,7 @@ Personal reference doc. Every practice question (DataLemur, LeetCode, etc.) that
 | 24 | First self-join — the same table referenced twice under two aliases to compare a row against one specific other row it points to; why aliases become mandatory, not optional, once a table appears twice | DataLemur — Well Paid Employees, employees who earn more than their direct manager | `JOIN` only needs two *table references*, not two *different* tables; `e.manager_id = m.employee_id` matches each employee's own row to their manager's row via the FK/PK relationship (Entry #4, reapplied); a window function can't fetch "one specific named other row" — that's a `JOIN`'s job, not a window function's; `INNER JOIN` silently drops rows with no match (including `NULL` FK values, which never equal anything) — here that's correct behavior, not a bug to work around (contrast with Entry #17) |
 | 25 | First scalar subquery — why `WHERE` can't hold an aggregate; why hard-coding the computed value goes stale | Chinook — Tracks longer than average length | A query inside `( )` runs first over all rows and returns one value for the outer `WHERE` to compare against; parentheses are mandatory; recompute, never hard-code |
 | 26 | Histogram with a zero bucket; filter in `ON` vs `WHERE` on a `LEFT JOIN`; `COUNT(*)` vs `COUNT(column)` vs `COUNT(DISTINCT column)` | DataLemur — IBM db2 Product Analytics | Anchor on the full list and `LEFT JOIN` activity with its filters in `ON` (a `WHERE` on the right table drops the zero rows); group by the anchor's key; `COUNT(column)` gives unmatched rows 0, `COUNT(*)` gives 1; CTE + outer `GROUP BY` the count (Entry #1 shape) |
+| 27 | Two conditional counts in one row; integer division chops decimals; `CASE` inside `SUM` for signed amounts | DataLemur — App Click-Through Rate (also PayPal final account balance) | One `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` per thing counted; `100.0 *` first so the division is decimal (`100` turned 66.67 into 66.00); single quotes, exact case for strings |
 
 ---
 
@@ -1954,3 +1955,114 @@ order by unique_queries;
 - `IS 7,8,9` / `IS 2023` — `IS` used for value comparison (repeat of Entry #7's `IS` confusion).
 - Forgot `EXTRACT` and `IN` after the 5-week gap — recall decay, not misunderstanding.
 - Outer query initially selected `employee_id` — reprinting step 1 instead of bucketing.
+
+---
+
+## 27. Two Conditional Counts in One Row, and Integer Division — DataLemur: App Click-Through Rate (CTR)
+
+*(Also Ace the Data Science Interview, SQL chapter, problem #1.)*
+
+### The question
+`events(app_id, event_type, timestamp)`, where `event_type` is `'impression'` or `'click'`. For 2022, calculate each app's click-through rate: `100.0 * clicks / impressions`, rounded to 2 decimal places. Output `app_id`, `ctr`.
+
+### Why this needs the technique it needs
+1. **Both numbers live in the same column.** Clicks and impressions aren't separate columns — they're different *values* of `event_type`, spread across different rows. A plain `COUNT(*)` per app counts both together. You need two separate counts, each one ignoring the other kind of row, and both have to land in the same output row so one can be divided by the other. That's conditional aggregation: a `CASE WHEN` inside an aggregate, once per thing you're counting.
+2. **Integer division silently drops decimals.** Both counts are whole numbers. In Postgres, whole number ÷ whole number gives a whole number — the decimal part is **chopped off, not rounded**. `1 / 3` is `0`, not `0.33`. No error, no warning — just a wrong answer that looks plausible.
+
+### Real-world version of this same problem
+A shop owner has one notebook where every customer who walks in gets a line, marked either "looked" or "bought." At the end of the year she wants each branch's conversion rate: buyers ÷ lookers. She can't just count lines per branch — that mixes the two. She goes down each branch's page with two tally columns, adding 1 to "looked" only on "looked" lines and 1 to "bought" only on "bought" lines, then divides. (Same idea as the PayPal balance question solved the same day, below: one pass over the rows, each row contributing differently depending on its type. Also the shape of conversion-rate and retention-rate metrics in the capstone.)
+
+### The concept, explained from zero
+
+**Conditional aggregation — counting only some rows:**
+```sql
+SUM(CASE WHEN event_type = 'click' THEN 1 ELSE 0 END)
+```
+- `CASE WHEN` runs **once per row** and turns that row into a number: `1` if it's a click, `0` if it isn't.
+- `SUM` then runs **across all the rows in the group** and adds those 1s and 0s — which is exactly the number of clicks.
+- Write it a second time with `'impression'` and you have the other count, in the same row.
+- One `CASE` can't do both jobs: a `CASE` that returns 1 for impressions and 0 for clicks just gives you the impression count.
+
+**Integer vs decimal division:**
+- `100 * 1 / 3` → `100 / 3` → `33` (the `.33` is thrown away).
+- `100.0 * 1 / 3` → `100.0 / 3` → `33.333...`.
+- `100.0` is a decimal (`numeric`). SQL works left to right, so multiplying by `100.0` **first** turns the number into a decimal *before* the division happens. That's why the question specifically says `100.0`, and why its position at the front matters.
+- When the division comes out even, you can't see the problem: `100 * 1 / 2` is exactly `50` either way. It only shows when there's a remainder.
+
+### The logic used to solve it (the actual reasoning trace)
+1. **Planned before coding** with three questions: what's one output row, how do you count two things in one row, where does the 2022 filter go.
+2. **"One output row = one ___":** first said `account_id` (carried over from the PayPal question just solved) → corrected to `app_id` after re-reading the `events` columns.
+3. **2022 filter:** `WHERE` on the first try; later wrote `extract(year from timestamp) = 2022` correctly.
+4. **The two counts took four rounds:**
+   - First draft was one `CASE` with impression → 1, click → 0. Only counts impressions — CTR needs two numbers.
+   - Second draft split it into two `SUM`s (the key idea), but with no parentheses around `CASE ... END`.
+   - Third draft added parentheses, but `"Impression"` was in double quotes (Postgres reads double quotes as a *column name*) and both strings were capitalized (`'Click'`, `'Impression'`). The data is lowercase, and Postgres compares strings case-sensitively — `'Click'` would never match, so the count would silently be 0.
+   - Fourth draft: both counts correct.
+5. **Asked to walk through the rest** (the invited teaching moment): which count goes on top (clicks), why `100.0` goes first, and wrapping in `ROUND(..., 2)`.
+6. **Submitted — passed.**
+7. **Tested the `100` vs `100.0` claim himself** by running both versions on DataLemur's sample data. `100.0` gave `33.33` and `66.67`; `100` gave `33.00` and `66.00`. Initially reported the second result as "33 and 67" from memory — the screenshot showed `66.00`, confirming the decimals are chopped, not rounded (66.67 → 66). The `.00` is only `ROUND(..., 2)` formatting a number that's already whole.
+
+### A hand-trace through sample data
+The question's example input:
+
+| app_id | event_type |
+|---|---|
+| 123 | impression |
+| 123 | impression |
+| 123 | click |
+| 234 | impression |
+| 234 | click |
+
+After `CASE` (per row), then `SUM` (per app):
+
+| app_id | clicks = SUM(click → 1) | impressions = SUM(impression → 1) |
+|---|---|---|
+| 123 | 0 + 0 + 1 = **1** | 1 + 1 + 0 = **2** |
+| 234 | 0 + 1 = **1** | 1 + 0 = **1** |
+
+CTR: app 123 → `100.0 * 1 / 2 = 50.00`; app 234 → `100.0 * 1 / 1 = 100.00`. (Both divide evenly, so `100` would give the same answer here — DataLemur's run data had uneven counts, which is where the difference showed up.)
+
+### Full solution
+As submitted (passed):
+```sql
+select app_id,round(100.0* sum(case when event_type = 'click' then 1 else 0 end)/
+sum(case when event_type = 'impression' then 1 else 0 end),2)
+as ctr
+from events
+where extract(year from timestamp) = 2022
+group by app_id;
+```
+
+### The pattern to remember
+**A rate or ratio of two kinds of rows from the same column:** `GROUP BY` the entity → one `SUM(CASE WHEN type = 'A' THEN 1 ELSE 0 END)` for the top, another for `'B'` on the bottom → put `100.0 *` at the very front → wrap in `ROUND(..., n)`.
+
+**Same day, same pattern — PayPal final account balance** (solved independently, no help needed):
+```sql
+SELECT
+    account_id,
+    SUM(
+        CASE
+            WHEN transaction_type = 'Deposit' THEN amount
+            WHEN transaction_type = 'Withdrawal' THEN -amount
+            ELSE 0
+        END
+    ) AS final_balance
+FROM transactions
+GROUP BY account_id;
+```
+Here the `CASE` returns a signed *amount* instead of 1/0 — deposits positive, withdrawals negative — and `SUM` nets them out. Restated in his own words: *"once it checks transaction type it adds it and if it is withdrawal it removes from it and then it takes the sum (+ & −)."* Same rule in both: **`CASE` decides what each row is worth, `SUM` combines the rows.** It has to sit *inside* the aggregate — on its own, a `CASE` would have to look at one `event_type` for a group that contains several.
+
+### Best practices / general approach
+- **Trigger words:** "rate," "ratio," "percentage of," "CTR," "conversion" → two conditional counts divided.
+- **Whenever you divide two counts, ask "could this come out as a whole number by accident?"** Put `100.0 *` (or `::numeric`) first. `100 *` hides the bug whenever the test data happens to divide evenly.
+- **Strings use single quotes and must match the data's exact capitalization.** Check the example input before writing `'click'` vs `'Click'`.
+- **Each `SUM(...)` needs its own parentheses** around the whole `CASE ... END`, and every branch needs its own `WHEN`.
+- **To check a claim like "100 vs 100.0 makes a difference," run both versions and compare.** He did exactly this, and the screenshot settled a detail his memory had wrong.
+
+### Mistakes made this time
+- `account_id` instead of `app_id` — carried the previous question's column into a new table without re-reading the schema (look-up-vs-guess gap).
+- One `CASE` trying to produce both counts.
+- Missing `WHEN` on branches, missing `SUM(...)` parentheses, `o` for `0`.
+- Double quotes on a string, plus wrong capitalization (`'Click'`).
+- After writing `FROM`/`WHERE`/`GROUP BY` correctly, asked again "how do you count only clicks and only impressions in the same row?" even though his two `SUM`s already did it — didn't recognize his own finished pieces as the answer (self-code-reading gap).
+- First explanation of the PayPal pattern was "we need to get a count of the transaction_type" — it's a sum of signed amounts, not a count. Corrected himself on the next turn.
